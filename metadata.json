@@ -1,0 +1,6 @@
+{
+  "name": "VerbaForma — Page-by-Page PDF AI Humanizer",
+  "description": "Upload any PDF to humanize AI-generated text page by page into natural human writing while locking all images, diagrams, and page layouts in their exact original positions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
