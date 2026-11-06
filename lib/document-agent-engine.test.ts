@@ -14,6 +14,9 @@ import {
   generateChatGptStyleResponse,
   autoFillAllFromSinglePrompt,
   applyPromptToDocumentOrSection,
+  SAMPLE_IMPORTED_PDF_DATA,
+  buildCanonicalDocumentFromImportedText,
+  editDocumentWithChatGptPrompt,
 } from './document-agent-engine';
 
 test('Step B & C: analyzeRequirementsAndMissingInfo detects missing required fields and generates Roman Urdu + English questions with 3 AI suggested answers', () => {
@@ -185,4 +188,40 @@ test('ChatGPT Studio: generateChatGptStyleResponse takes prompt + input content 
   assert.ok(reply.canonicalDocument);
   assert.ok(reply.canonicalDocument!.sections.length >= 2);
 });
+
+test('PDF Import & ChatGPT Edit: buildCanonicalDocumentFromImportedText and editDocumentWithChatGptPrompt preserve sections, lock facts, and edit imported PDF under 10% AI score', () => {
+  const imported = buildCanonicalDocumentFromImportedText({
+    fileName: SAMPLE_IMPORTED_PDF_DATA.fileName,
+    rawText: SAMPLE_IMPORTED_PDF_DATA.pageTexts.join('\n\n'),
+    pageTexts: SAMPLE_IMPORTED_PDF_DATA.pageTexts,
+    tone: 'Academic',
+    audience: 'Executive / C-Suite',
+  });
+
+  assert.equal(imported.canonicalDocument.sections.length, 3);
+  assert.ok(imported.canonicalDocument.title.includes('AI Research Report With Figures'));
+  assert.ok((imported.chatReply.aiScoreAfter ?? 100) < 10);
+  const allImportedText = imported.canonicalDocument.sections
+    .map((s) => s.paragraphs.join(' '))
+    .join(' ');
+  assert.ok(allImportedText.includes('18.4%'));
+  assert.ok(allImportedText.includes('42.6%'));
+  assert.ok(allImportedText.includes('$145,000'));
+
+  const edited = editDocumentWithChatGptPrompt({
+    doc: imported.canonicalDocument,
+    promptInstruction: 'Add 99.95% grid reliability SLA and executive ROI milestone',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+
+  assert.equal(edited.updatedDocument.sections.length, 3);
+  assert.ok((edited.chatReply.aiScoreAfter ?? 100) < 10);
+  const allEditedText = edited.updatedDocument.sections
+    .map((s) => s.paragraphs.join(' '))
+    .join(' ');
+  assert.ok(allEditedText.includes('99.95%'));
+  assert.ok(allEditedText.includes('18.4%'));
+});
+
 
