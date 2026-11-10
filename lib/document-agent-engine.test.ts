@@ -224,4 +224,85 @@ test('PDF Import & ChatGPT Edit: buildCanonicalDocumentFromImportedText and edit
   assert.ok(allEditedText.includes('18.4%'));
 });
 
+test('Claude Artifact Iterative Section Builder & Top Humanizer PDF Bridge: appends new sections via prompt and compiles PDF with original font & vector figure shape', async () => {
+  const reply = generateChatGptStyleResponse({
+    prompt: 'Create a Business Proposal for Nova Retail Group ($8,500/month, 12 weeks, 4.0x ROAS)',
+    tone: 'Persuasive',
+    audience: 'Client / Small Business Owner',
+  });
+  const baseDoc = reply.canonicalDocument!;
+  const initialCount = baseDoc.sections.length;
 
+  // Iterative prompt asking to add a new section (like Claude Artifacts)
+  const afterAddSection = editDocumentWithChatGptPrompt({
+    doc: baseDoc,
+    promptInstruction: 'Add a new section on 99.99% Uptime SLA & Enterprise Security',
+    tone: 'Persuasive',
+    audience: 'Client / Small Business Owner',
+  });
+
+  assert.equal(afterAddSection.updatedDocument.sections.length, initialCount + 1);
+  const lastSec =
+    afterAddSection.updatedDocument.sections[afterAddSection.updatedDocument.sections.length - 1];
+  assert.ok(lastSec.heading.toLowerCase().includes('99.99% uptime sla'));
+  assert.ok(lastSec.metrics.aiScoreAfter < 10);
+
+  // Compile PDF for Top Humanizer with Original Serif Font & Executive Figure Shape
+  const topHumanizerPdfBytes = await exportCanonicalDocumentToPdfBytes(
+    afterAddSection.updatedDocument,
+    PROFESSIONAL_TEMPLATES[0],
+    {
+      cleanMinimalStructure: true,
+      forTopHumanizer: true,
+      fontStyle: 'serif',
+      shapePreset: 'executive_figure',
+    }
+  );
+  assert.ok(
+    topHumanizerPdfBytes.byteLength > 1200,
+    'Expected valid multi-section PDF with embedded TimesRoman font and vector figure diagram'
+  );
+});
+
+test('Claude Extended Thinking Engine: generates 6-stage thinking trace, per-section Micro-Thinking blueprints, and non-repetitive first-principles prose across all sections', () => {
+  const reply = generateChatGptStyleResponse({
+    prompt:
+      'Mujhe digital marketing agency (Apex Growth Digital) ke liye client Nova Retail Group ka complete Business Proposal chahiye ($8,500/month retainer, 12 weeks timeline, scale ROAS from 2.1x to 4.0x).',
+    tone: 'Persuasive',
+    audience: 'Client / Small Business Owner',
+    depthMode: 'extended_deep',
+  });
+
+  assert.ok(reply.thinkingTrace, 'Expected 6-stage ClaudeExtendedThinkingTrace on assistant reply');
+  assert.equal(reply.thinkingTrace!.steps.length, 6, 'Expected 6 reasoning stages');
+  assert.ok(
+    reply.thinkingTrace!.microDecisionsCount >= 40,
+    `Expected >= 40 micro-decisions verified, got ${reply.thinkingTrace!.microDecisionsCount}`
+  );
+
+  const doc = reply.canonicalDocument!;
+  assert.ok(doc.thinkingTrace, 'Expected thinkingTrace on CanonicalDocumentModel');
+  assert.ok(doc.sections.length >= 6);
+
+  // Verify every single section has its own deep Micro-Thinking blueprint AND distinct opening prose
+  const firstSentences = new Set<string>();
+  for (const sec of doc.sections) {
+    assert.ok(sec.microThinking, `Expected microThinking on section "${sec.heading}"`);
+    assert.ok(sec.microThinking!.cognitiveGoal.length > 20);
+    assert.ok(sec.microThinking!.firstPrinciplesLogic.length > 20);
+    assert.ok(sec.microThinking!.factLockAudit.length > 15);
+    assert.ok(sec.microThinking!.cadenceAndBurstinessPlan.length > 20);
+    assert.ok(sec.microThinking!.selfCritiqueResolution.length > 20);
+    assert.equal(sec.microThinking!.thinkingUpgradePrompts.length, 3);
+    assert.ok(sec.microThinking!.confidenceScore >= 96);
+
+    const firstPara = sec.paragraphs[0] || '';
+    const openingSlice = firstPara.slice(0, 48).toLowerCase();
+    firstSentences.add(openingSlice);
+  }
+
+  assert.ok(
+    firstSentences.size >= 5,
+    `Expected distinct non-repetitive prose across sections, got ${firstSentences.size} unique openings`
+  );
+});

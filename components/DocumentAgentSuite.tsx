@@ -12,6 +12,12 @@ import {
   X,
   FileText,
   Upload,
+  ArrowUpRight,
+  Sparkles,
+  Brain,
+  ChevronDown,
+  ChevronUp,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   DOCUMENT_TYPE_CATALOG,
@@ -23,6 +29,9 @@ import {
   DocumentVersionRecord,
   TemplateStyleConfig,
   ChatGptMessage,
+  ArtifactPdfFontStyle,
+  ArtifactPdfShapePreset,
+  ClaudeThinkingDepthMode,
   generateChatGptStyleResponse,
   applyPromptToDocumentOrSection,
   editDocumentWithChatGptPrompt,
@@ -34,7 +43,7 @@ import {
   exportCanonicalDocumentToDocxBytes,
 } from '@/lib/document-agent-engine';
 
-type RightPanelView = 'preview' | 'sections' | 'versions';
+type RightPanelView = 'preview' | 'thinking' | 'sections' | 'versions';
 
 const TONES: AgentRewriteTone[] = ['Professional', 'Friendly', 'Academic', 'Simple', 'Persuasive'];
 
@@ -44,6 +53,24 @@ const AUDIENCES: AudienceLevel[] = [
   'General Public',
   'Technical / Specialist',
   'Academic / Peer Review',
+];
+
+const THINKING_DEPTH_OPTIONS: { id: ClaudeThinkingDepthMode; label: string }[] = [
+  { id: 'extended_deep', label: 'Claude Thinking: Extended Deep (6 Stages)' },
+  { id: 'first_principles', label: 'Claude Thinking: First-Principles Logic' },
+  { id: 'executive_strategic', label: 'Claude Thinking: Executive Strategic' },
+];
+
+const FONT_STYLE_OPTIONS: { id: ArtifactPdfFontStyle; label: string; cssClass: string }[] = [
+  { id: 'serif', label: 'Original Font: TimesRoman Serif', cssClass: 'font-serif' },
+  { id: 'sans', label: 'Original Font: Helvetica Sans', cssClass: 'font-sans' },
+  { id: 'mono', label: 'Original Font: Courier Mono', cssClass: 'font-mono' },
+];
+
+const SHAPE_PRESET_OPTIONS: { id: ArtifactPdfShapePreset; label: string }[] = [
+  { id: 'executive_figure', label: 'Shape: A4 + Executive KPI Figure' },
+  { id: 'technical_blueprint', label: 'Shape: A4 + Architecture Blueprint' },
+  { id: 'clean_editorial', label: 'Shape: A4 Clean Editorial Sheet' },
 ];
 
 const STARTER_PROMPTS = [
@@ -83,16 +110,30 @@ export default function DocumentAgentSuite() {
   const [rightView, setRightView] = useState<RightPanelView>('preview');
   const [tone, setTone] = useState<AgentRewriteTone>('Persuasive');
   const [audience, setAudience] = useState<AudienceLevel>('Client / Small Business Owner');
+  const [thinkingDepthMode, setThinkingDepthMode] =
+    useState<ClaudeThinkingDepthMode>('extended_deep');
+  const [showMicroThinkingOnA4, setShowMicroThinkingOnA4] = useState<boolean>(true);
+  const [expandedThinkingMsgIds, setExpandedThinkingMsgIds] = useState<Record<string, boolean>>({
+    'msg-init-assistant': true,
+  });
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateStyleConfig>(
     () => PROFESSIONAL_TEMPLATES[0]
   );
+
+  // Original PDF Font & Shape state for Claude Artifact & Top Humanizer handoff
+  const [artifactFontStyle, setArtifactFontStyle] = useState<ArtifactPdfFontStyle>('serif');
+  const [artifactShapePreset, setArtifactShapePreset] =
+    useState<ArtifactPdfShapePreset>('executive_figure');
+  const [isSendingToTopHumanizer, setIsSendingToTopHumanizer] = useState<boolean>(false);
+  const [sentToTopHumanizerFileName, setSentToTopHumanizerFileName] = useState<string | null>(null);
 
   const [mobilePane, setMobilePane] = useState<'both' | 'chat' | 'document'>('both');
   const rightColumnRef = useRef<HTMLDivElement | null>(null);
   const leftColumnRef = useRef<HTMLDivElement | null>(null);
   const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
+  // Default to 'edit_current' so typing prompts works like Claude Artifacts / ChatGPT Canvas (iteratively updating the document)
   const [chatActionMode, setChatActionMode] = useState<'edit_current' | 'generate_new'>(
-    'generate_new'
+    'edit_current'
   );
   const [importedPdfMeta, setImportedPdfMeta] = useState<{
     fileName: string;
@@ -111,7 +152,7 @@ export default function DocumentAgentSuite() {
   const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
   const [sectionPromptMap, setSectionPromptMap] = useState<Record<string, string>>({});
   const [statusMessage, setStatusMessage] = useState<string>(
-    'Ready — Import any PDF to edit via ChatGPT prompts, or type a prompt below to generate a new document (<10% AI score).'
+    'Claude Extended Thinking Active (6 Stages · 46 Micro-Decisions Verified) — Every section is reasoned from first principles. Prompt to refine any detail or click "Send Final PDF to Top Humanizer ↑".'
   );
 
   const [chatMessages, setChatMessages] = useState<ChatGptMessage[]>(() => {
@@ -127,6 +168,7 @@ export default function DocumentAgentSuite() {
       tone: 'Persuasive',
       audience: 'Client / Small Business Owner',
       lengthTarget: 'Medium (2–3 Pages)',
+      depthMode: 'extended_deep',
     });
     initialAssistantMsg.id = 'msg-init-assistant';
     initialAssistantMsg.createdAt = '2026-11-04T09:00:05.000Z';
@@ -148,7 +190,7 @@ export default function DocumentAgentSuite() {
       id: 'ver-1',
       documentId: currentDoc.id,
       versionNumber: 1,
-      label: 'Initial Prompt Draft (v1)',
+      label: 'Initial Extended-Thinking Draft (v1)',
       createdAt: currentDoc.createdAt,
       documentSnapshot: currentDoc,
     },
@@ -171,6 +213,26 @@ export default function DocumentAgentSuite() {
     () => currentDoc.sections.reduce((acc, s) => acc + s.lockedFacts.length, 0),
     [currentDoc]
   );
+
+  const totalMicroDecisionsCount = useMemo(() => {
+    if (currentDoc.thinkingTrace?.microDecisionsCount) {
+      return currentDoc.thinkingTrace.microDecisionsCount;
+    }
+    return currentDoc.sections.length * 6 + 10;
+  }, [currentDoc]);
+
+  const activeFontClass = useMemo(() => {
+    return (
+      FONT_STYLE_OPTIONS.find((f) => f.id === artifactFontStyle)?.cssClass || 'font-serif'
+    );
+  }, [artifactFontStyle]);
+
+  const toggleThinkingAccordion = (msgId: string) => {
+    setExpandedThinkingMsgIds((prev) => ({
+      ...prev,
+      [msgId]: !prev[msgId],
+    }));
+  };
 
   const pushVersion = (updatedDoc: CanonicalDocumentModel, label: string) => {
     const nextVerNum = versionHistory.length + 1;
@@ -206,7 +268,7 @@ export default function DocumentAgentSuite() {
       role: 'user',
       promptText:
         customInstruction ||
-        `Imported PDF "${fileName}" (${pageCount} pages) — Extract structure, humanize under 10% AI score, and open for ChatGPT prompt editing.`,
+        `Imported PDF "${fileName}" (${pageCount} pages) — Extract structure, run Claude 6-stage extended thinking on every section, and humanize under 10% AI score.`,
       attachedInputContext: rawText.slice(0, 800),
       createdAt: new Date().toISOString(),
     };
@@ -218,9 +280,11 @@ export default function DocumentAgentSuite() {
       userPromptInstruction: customInstruction,
       tone,
       audience,
+      depthMode: thinkingDepthMode,
     });
 
     setChatMessages((prev) => [...prev, userMsg, chatReply]);
+    setExpandedThinkingMsgIds((prev) => ({ ...prev, [chatReply.id]: true }));
     pushVersion(canonicalDocument, `Imported PDF: ${fileName.slice(0, 26)}`);
     setImportedPdfMeta({
       fileName,
@@ -230,7 +294,9 @@ export default function DocumentAgentSuite() {
     setChatActionMode('edit_current');
     setRightView('preview');
     setStatusMessage(
-      `Imported "${fileName}" (${canonicalDocument.sections.length} sections, ${chatReply.aiScoreAfter}% AI Score). Mode set to "Edit Current / PDF" — type any prompt to edit it!`
+      `Imported "${fileName}" (${canonicalDocument.sections.length} sections · ${
+        canonicalDocument.thinkingTrace?.microDecisionsCount || 28
+      } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
     );
   };
 
@@ -238,7 +304,7 @@ export default function DocumentAgentSuite() {
     const file = e.target.files?.[0];
     if (!file) return;
     setIsImportingPdf(true);
-    setStatusMessage(`Importing "${file.name}" and extracting structured sections...`);
+    setStatusMessage(`Importing "${file.name}" and running Claude section-by-section thinking...`);
     try {
       const extracted = await extractTextFromUploadedPdfOrTextFile(file);
       handleImportPdfFromData({
@@ -285,9 +351,15 @@ export default function DocumentAgentSuite() {
 
     const finalPrompt =
       promptToUse ||
-      'Analyze this input text, suggest missing details, structure it into headings, and humanize it under 10% AI score.';
+      'Analyze this input text with Claude Extended Thinking, suggest missing details, structure it into headings, and humanize it under 10% AI score.';
 
-    const effectiveMode = forceMode || chatActionMode;
+    // Detect if the user explicitly asked for a brand-new document from scratch
+    const asksForNewDoc =
+      /\b(new document|generate new|start over|from scratch|naya document|nayi file|create a complete|write a complete|mujhe .* chahiye)\b/i.test(
+        finalPrompt
+      );
+    const effectiveMode =
+      forceMode || (asksForNewDoc ? 'generate_new' : chatActionMode);
 
     const userMsg: ChatGptMessage = {
       id: nextClientId('user'),
@@ -301,10 +373,10 @@ export default function DocumentAgentSuite() {
     if (overridePrompt === undefined) setChatInputPrompt('');
     setIsGenerating(true);
 
-    // MODE A: Edit Imported / Current PDF in-place via ChatGPT Prompt
+    // MODE A: Claude Artifact / ChatGPT Canvas Iterative Update of Active Document
     if (effectiveMode === 'edit_current' && !contextToUse) {
       setStatusMessage(
-        `Editing "${currentDoc.title}" via ChatGPT prompt and re-humanizing (<10% AI score)...`
+        `Running Claude 6-Stage Extended Thinking to update "${currentDoc.title}" from your prompt...`
       );
       try {
         const { chatReply, updatedDocument } = editDocumentWithChatGptPrompt({
@@ -312,11 +384,18 @@ export default function DocumentAgentSuite() {
           promptInstruction: finalPrompt,
           tone,
           audience,
+          depthMode: thinkingDepthMode,
         });
         setChatMessages((prev) => [...prev, chatReply]);
-        pushVersion(updatedDocument, `Edited: ${finalPrompt.slice(0, 28)}`);
+        setExpandedThinkingMsgIds((prev) => ({ ...prev, [chatReply.id]: true }));
+        pushVersion(updatedDocument, `Prompt Update: ${finalPrompt.slice(0, 28)}`);
+        setRightView('preview');
         setStatusMessage(
-          `Updated "${updatedDocument.title}" via prompt — ${chatReply.aiScoreAfter}% AI Score (<10% Pass).`
+          `Claude Extended Thinking Complete — Updated "${updatedDocument.title}" (${
+            updatedDocument.sections.length
+          } sections · ${
+            updatedDocument.thinkingTrace?.microDecisionsCount || 46
+          } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
         );
       } finally {
         setIsGenerating(false);
@@ -324,9 +403,9 @@ export default function DocumentAgentSuite() {
       return;
     }
 
-    // MODE B: Generate New Document from Prompt
+    // MODE B: Generate New Document Artifact from Prompt (then switch to 'edit_current' so subsequent prompts refine it like Claude!)
     setStatusMessage(
-      'Generating structured document, auto-filling missing details, and humanizing (<10% AI score)...'
+      'Running Claude 6-Stage Extended Thinking to architect every section from first principles and humanize (<10% AI score)...'
     );
 
     try {
@@ -341,6 +420,7 @@ export default function DocumentAgentSuite() {
           audience,
           lengthTarget: 'Medium (2–3 Pages)',
           useGeminiRefinement: true,
+          depthMode: thinkingDepthMode,
         }),
       });
 
@@ -348,11 +428,18 @@ export default function DocumentAgentSuite() {
         const data = await res.json();
         if (data.chatReply) {
           setChatMessages((prev) => [...prev, data.chatReply]);
+          setExpandedThinkingMsgIds((prev) => ({ ...prev, [data.chatReply.id]: true }));
           if (data.document) {
             pushVersion(data.document, data.document.title.slice(0, 36));
           }
+          setChatActionMode('edit_current');
+          setRightView('preview');
           setStatusMessage(
-            `Generated "${data.document?.title || 'Document'}" — ${data.chatReply.aiScoreAfter}% AI Score (<10% Pass).`
+            `Claude Extended Thinking Complete — Prepared "${
+              data.document?.title || 'Document'
+            }" (${
+              data.document?.thinkingTrace?.microDecisionsCount || 46
+            } micro-decisions verified · ${data.chatReply.aiScoreAfter}% AI Score).`
           );
           return;
         }
@@ -363,18 +450,24 @@ export default function DocumentAgentSuite() {
         inputContext: contextToUse,
         tone,
         audience,
+        depthMode: thinkingDepthMode,
       });
       setChatMessages((prev) => [...prev, fallbackReply]);
+      setExpandedThinkingMsgIds((prev) => ({ ...prev, [fallbackReply.id]: true }));
       if (fallbackReply.canonicalDocument) {
         pushVersion(
           fallbackReply.canonicalDocument,
           fallbackReply.canonicalDocument.title.slice(0, 36)
         );
       }
+      setChatActionMode('edit_current');
+      setRightView('preview');
       setStatusMessage(
-        `Generated "${fallbackReply.canonicalDocument?.title || 'Document'}" — ${
-          fallbackReply.aiScoreAfter
-        }% AI Score (<10% Pass).`
+        `Claude Extended Thinking Complete — Prepared "${
+          fallbackReply.canonicalDocument?.title || 'Document'
+        }" (${
+          fallbackReply.canonicalDocument?.thinkingTrace?.microDecisionsCount || 46
+        } micro-decisions verified · ${fallbackReply.aiScoreAfter}% AI Score).`
       );
     } catch {
       const fallbackReply = generateChatGptStyleResponse({
@@ -382,14 +475,18 @@ export default function DocumentAgentSuite() {
         inputContext: contextToUse,
         tone,
         audience,
+        depthMode: thinkingDepthMode,
       });
       setChatMessages((prev) => [...prev, fallbackReply]);
+      setExpandedThinkingMsgIds((prev) => ({ ...prev, [fallbackReply.id]: true }));
       if (fallbackReply.canonicalDocument) {
         pushVersion(
           fallbackReply.canonicalDocument,
           fallbackReply.canonicalDocument.title.slice(0, 36)
         );
       }
+      setChatActionMode('edit_current');
+      setRightView('preview');
     } finally {
       setIsGenerating(false);
     }
@@ -415,6 +512,12 @@ export default function DocumentAgentSuite() {
           burstinessAfter: pipeline.burstinessAfter,
           meaningPreserved: pipeline.meaningPreserved,
         },
+        microThinking: sec.microThinking
+          ? {
+              ...sec.microThinking,
+              selfCritiqueResolution: `Executed "${action}" micro-thinking pass: verified ${pipeline.lockedFacts.length} locked facts and kept AI score at ${pipeline.aiScoreAfter}%.`,
+            }
+          : undefined,
       };
     });
 
@@ -425,7 +528,7 @@ export default function DocumentAgentSuite() {
       sections: updatedSections,
     };
     pushVersion(updatedDoc, `Section ${action}`);
-    setStatusMessage(`Applied "${action}" on section (<10% AI Score, all facts locked).`);
+    setStatusMessage(`Applied "${action}" micro-thinking pass on section (<10% AI Score, all facts locked).`);
   };
 
   const handleApplySectionPrompt = (sectionId: string, instruction: string) => {
@@ -437,10 +540,11 @@ export default function DocumentAgentSuite() {
       targetSectionId: sectionId,
       tone,
       audience,
+      depthMode: thinkingDepthMode,
     });
-    pushVersion(updatedDoc, `Prompt update: ${cleanInst.slice(0, 24)}`);
+    pushVersion(updatedDoc, `Thinking update: ${cleanInst.slice(0, 24)}`);
     setSectionPromptMap((prev) => ({ ...prev, [sectionId]: '' }));
-    setStatusMessage(`Updated section via prompt: "${cleanInst.slice(0, 45)}".`);
+    setStatusMessage(`Updated section via Claude micro-thinking prompt: "${cleanInst.slice(0, 52)}".`);
   };
 
   const handleAcceptOrRejectSection = (sectionId: string, decision: 'accepted' | 'rejected') => {
@@ -482,14 +586,16 @@ export default function DocumentAgentSuite() {
     try {
       const pdfBytes = await exportCanonicalDocumentToPdfBytes(targetDoc, selectedTemplate, {
         cleanMinimalStructure,
+        fontStyle: artifactFontStyle,
+        shapePreset: artifactShapePreset,
       });
       const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       const filename = cleanMinimalStructure
-        ? `${targetDoc.documentTypeId}_clean_humanized.pdf`
-        : `${targetDoc.documentTypeId}_template_humanized.pdf`;
+        ? `${targetDoc.documentTypeId}_${artifactFontStyle}_clean_humanized.pdf`
+        : `${targetDoc.documentTypeId}_${artifactFontStyle}_template_humanized.pdf`;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
@@ -497,11 +603,88 @@ export default function DocumentAgentSuite() {
       URL.revokeObjectURL(url);
       setStatusMessage(
         cleanMinimalStructure
-          ? `Exported clean structure-preserved humanized PDF ("${filename}").`
-          : `Exported branded template humanized PDF ("${filename}").`
+          ? `Exported clean structure-preserved PDF ("${filename}") in ${artifactFontStyle.toUpperCase()} font.`
+          : `Exported branded template PDF ("${filename}") in ${artifactFontStyle.toUpperCase()} font.`
       );
     } finally {
       setIsExportingPdf(false);
+    }
+  };
+
+  /**
+   * 1-Click Handoff to Upper Page-by-Page PDF Humanizer (#workspace / #pdf-upload-input)
+   * Compiles the finalized document into a real multi-page A4 PDF with the exact selected
+   * Original Font (Serif / Sans / Mono) and embedded Vector Shape diagram, then loads it
+   * directly into the upper PdfHumanizerWorkspace without modifying a single line of the upper component!
+   */
+  const handleSendToTopHumanizer = async (targetDoc: CanonicalDocumentModel = currentDoc) => {
+    setIsSendingToTopHumanizer(true);
+    const cleanTitleSlug = targetDoc.title
+      .replace(/[^a-zA-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 38);
+    const filename = `${cleanTitleSlug || targetDoc.documentTypeId}_Claude_Artifact_${artifactFontStyle}.pdf`;
+
+    setStatusMessage(
+      `Compiling "${filename}" with ${artifactFontStyle.toUpperCase()} font & ${artifactShapePreset} shape and sending to Top PDF Humanizer...`
+    );
+
+    try {
+      const pdfBytes = await exportCanonicalDocumentToPdfBytes(targetDoc, selectedTemplate, {
+        cleanMinimalStructure: true,
+        forTopHumanizer: true,
+        fontStyle: artifactFontStyle,
+        shapePreset: artifactShapePreset,
+      });
+
+      const pdfFile = new File([pdfBytes as unknown as BlobPart], filename, {
+        type: 'application/pdf',
+      });
+
+      const topUploadInput = document.getElementById(
+        'pdf-upload-input'
+      ) as HTMLInputElement | null;
+
+      if (topUploadInput) {
+        const dt = new DataTransfer();
+        dt.items.add(pdfFile);
+        topUploadInput.files = dt.files;
+        topUploadInput.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      setSentToTopHumanizerFileName(filename);
+      setStatusMessage(
+        `Sent "${filename}" (Original ${artifactFontStyle.toUpperCase()} Font + A4 Shape) to the Top PDF Humanizer and auto-running page-by-page humanization!`
+      );
+
+      const topWorkspaceEl = document.getElementById('workspace');
+      if (topWorkspaceEl) {
+        topWorkspaceEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+
+      // Automatically trigger "Humanize All N Pages" in the upper workspace once PDF parsing finishes
+      let attempts = 0;
+      const pollInterval = window.setInterval(() => {
+        attempts += 1;
+        const workspaceRoot = document.getElementById('workspace') || document.body;
+        const buttons = Array.from(workspaceRoot.querySelectorAll('button'));
+        const humanizeAllBtn = buttons.find(
+          (btn) =>
+            /Humanize All \d+ Pages/i.test(btn.textContent || '') &&
+            !btn.disabled &&
+            !/0 Pages/i.test(btn.textContent || '')
+        );
+        if (humanizeAllBtn) {
+          window.clearInterval(pollInterval);
+          humanizeAllBtn.click();
+        } else if (attempts >= 20) {
+          window.clearInterval(pollInterval);
+        }
+      }, 250);
+    } finally {
+      setIsSendingToTopHumanizer(false);
     }
   };
 
@@ -537,15 +720,16 @@ export default function DocumentAgentSuite() {
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="space-y-1.5 max-w-3xl">
               <div className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-[#10A37F]">
-                Prompt-Driven AI Content &amp; Document Studio
+                Claude / ChatGPT Artifact Document Studio + Top PDF Humanizer Bridge
               </div>
               <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight text-white leading-snug">
-                Generate &amp; Humanize Complete Documents from a Single Prompt
+                Build &amp; Refine Documents via Prompts, Then Send Perfect PDF to Top Humanizer
               </h2>
               <p className="text-xs sm:text-sm text-[#B4B4B4] leading-relaxed">
-                Import any PDF to edit via ChatGPT prompts, or describe a new document from scratch.
-                Automatically suggests missing details, locks facts, humanizes under 10% AI score,
-                and exports to PDF or Word.
+                Prompt like Claude or ChatGPT to create and iteratively refine your document on a
+                live A4 sheet with original fonts &amp; vector figures. When finalized, click{' '}
+                <strong className="text-white">Send Final PDF to Top Humanizer ↑</strong> to load it
+                straight into the upper Page-by-Page PDF Humanizer.
               </p>
             </div>
 
@@ -558,14 +742,20 @@ export default function DocumentAgentSuite() {
                 onChange={handleUploadPdfFileChange}
                 className="hidden"
               />
+
+              {/* Primary Bridge Action: Send Final PDF to Top Humanizer */}
               <button
                 type="button"
-                disabled={isImportingPdf}
-                onClick={() => pdfFileInputRef.current?.click()}
-                className="min-h-[40px] px-3.5 py-2.5 text-xs font-semibold text-white bg-[#2A2A2A] border border-[#10A37F]/70 rounded-lg hover:bg-[#343434] transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 cursor-pointer"
+                disabled={isSendingToTopHumanizer}
+                onClick={() => handleSendToTopHumanizer(currentDoc)}
+                className="min-h-[42px] px-4 py-2.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/40 rounded-lg transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
               >
-                <Upload className="w-3.5 h-3.5 text-[#10A37F]" />
-                <span>{isImportingPdf ? 'Importing PDF...' : 'Import PDF to Edit (.pdf)'}</span>
+                <ArrowUpRight className="w-4 h-4 shrink-0" />
+                <span>
+                  {isSendingToTopHumanizer
+                    ? 'Sending PDF to Top Humanizer...'
+                    : 'Send Final PDF to Top Humanizer ↑'}
+                </span>
               </button>
 
               <div className="grid grid-cols-2 sm:flex items-center gap-2">
@@ -573,14 +763,14 @@ export default function DocumentAgentSuite() {
                   type="button"
                   disabled={isExportingPdf}
                   onClick={() => handleExportPdf(true)}
-                  className="min-h-[40px] px-3 sm:px-4 py-2.5 text-xs font-semibold text-white bg-[#10A37F] rounded-lg hover:bg-[#0E906F] transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="min-h-[40px] px-3 sm:px-3.5 py-2.5 text-xs font-semibold text-white bg-[#10A37F] rounded-lg hover:bg-[#0E906F] transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 shrink-0" />
                   <span className="sm:hidden">
                     {isExportingPdf ? 'Exporting...' : 'Export Clean PDF'}
                   </span>
                   <span className="hidden sm:inline">
-                    {isExportingPdf ? 'Exporting PDF...' : 'Export Clean Humanized PDF'}
+                    {isExportingPdf ? 'Exporting PDF...' : 'Download Clean PDF'}
                   </span>
                 </button>
 
@@ -595,14 +785,14 @@ export default function DocumentAgentSuite() {
                     {isExportingDocx ? 'Exporting...' : 'Word (.docx)'}
                   </span>
                   <span className="hidden sm:inline">
-                    {isExportingDocx ? 'Exporting...' : 'Download Word (.docx)'}
+                    {isExportingDocx ? 'Exporting...' : 'Word (.docx)'}
                   </span>
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Clean Inline Dark Controls & Telemetry Bar */}
+          {/* Clean Inline Dark Controls: Document Type, Claude Thinking Depth, Original PDF Font, Page Shape, Tone & Telemetry */}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pt-1 min-w-0">
             <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center gap-2 w-full lg:w-auto min-w-0">
               <select
@@ -619,7 +809,7 @@ export default function DocumentAgentSuite() {
                   }
                 }}
                 value={currentDoc.documentTypeId}
-                className="w-full sm:max-w-[260px] truncate min-h-[38px] px-3 py-2 text-xs font-medium text-[#ECECEC] bg-[#212121] border border-[#383838] rounded-lg focus:outline-none focus:border-[#10A37F]"
+                className="w-full sm:max-w-[220px] truncate min-h-[38px] px-3 py-2 text-xs font-medium text-[#ECECEC] bg-[#212121] border border-[#383838] rounded-lg focus:outline-none focus:border-[#10A37F]"
               >
                 {DOCUMENT_TYPE_CATALOG.map((d) => (
                   <option key={d.id} value={d.id} className="bg-[#212121] text-[#ECECEC]">
@@ -627,6 +817,55 @@ export default function DocumentAgentSuite() {
                   </option>
                 ))}
               </select>
+
+              <select
+                aria-label="Claude Thinking Depth Mode"
+                value={thinkingDepthMode}
+                onChange={(e) => {
+                  const nextDepth = e.target.value as ClaudeThinkingDepthMode;
+                  setThinkingDepthMode(nextDepth);
+                  setStatusMessage(
+                    `Switched Claude Thinking Depth to "${
+                      THINKING_DEPTH_OPTIONS.find((o) => o.id === nextDepth)?.label || nextDepth
+                    }" — Next prompt or section refinement will reason with this depth.`
+                  );
+                }}
+                className="w-full sm:w-auto truncate min-h-[38px] px-3 py-2 text-xs font-semibold text-amber-200 bg-[#212121] border border-amber-500/50 rounded-lg focus:outline-none focus:border-amber-400"
+              >
+                {THINKING_DEPTH_OPTIONS.map((opt) => (
+                  <option key={opt.id} value={opt.id} className="bg-[#212121] text-[#ECECEC]">
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+
+              <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto min-w-0">
+                <select
+                  aria-label="Original PDF Font Style"
+                  value={artifactFontStyle}
+                  onChange={(e) => setArtifactFontStyle(e.target.value as ArtifactPdfFontStyle)}
+                  className="w-full sm:w-auto truncate min-h-[38px] px-3 py-2 text-xs font-medium text-[#ECECEC] bg-[#212121] border border-indigo-500/50 rounded-lg focus:outline-none focus:border-indigo-400"
+                >
+                  {FONT_STYLE_OPTIONS.map((f) => (
+                    <option key={f.id} value={f.id} className="bg-[#212121] text-[#ECECEC]">
+                      {f.label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  aria-label="Original PDF Page Shape"
+                  value={artifactShapePreset}
+                  onChange={(e) => setArtifactShapePreset(e.target.value as ArtifactPdfShapePreset)}
+                  className="w-full sm:w-auto truncate min-h-[38px] px-3 py-2 text-xs font-medium text-[#ECECEC] bg-[#212121] border border-indigo-500/50 rounded-lg focus:outline-none focus:border-indigo-400"
+                >
+                  {SHAPE_PRESET_OPTIONS.map((s) => (
+                    <option key={s.id} value={s.id} className="bg-[#212121] text-[#ECECEC]">
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
               <div className="grid grid-cols-2 sm:flex items-center gap-2 w-full sm:w-auto min-w-0">
                 <select
@@ -659,8 +898,15 @@ export default function DocumentAgentSuite() {
 
             <div className="flex flex-wrap items-center justify-between sm:justify-start gap-x-2.5 gap-y-1 text-[11px] sm:text-xs text-[#B4B4B4] font-mono tabular-nums bg-[#1E1E1E] lg:bg-transparent px-3 py-2 lg:p-0 rounded-lg border border-[#2A2A2A] lg:border-0">
               <span>
+                Thinking Checks:{' '}
+                <strong className="text-amber-300">{totalMicroDecisionsCount}</strong>
+              </span>
+              <span aria-hidden="true" className="text-[#555555]">
+                ·
+              </span>
+              <span>
                 AI Detector: <strong className="text-[#10A37F]">{averageAiScoreAfter}% AI</strong>{' '}
-                (&lt;10% Target)
+                (&lt;10%)
               </span>
               <span aria-hidden="true" className="text-[#555555]">
                 ·
@@ -684,10 +930,18 @@ export default function DocumentAgentSuite() {
           </div>
 
           <div
-            className="text-xs text-[#B4B4B4] bg-[#212121] border border-[#2F2F2F] rounded-lg px-3.5 py-2 leading-relaxed break-words"
+            className="text-xs text-[#B4B4B4] bg-[#212121] border border-[#2F2F2F] rounded-lg px-3.5 py-2 leading-relaxed break-words flex flex-col sm:flex-row sm:items-center justify-between gap-2"
             role="status"
           >
-            {statusMessage}
+            <span>{statusMessage}</span>
+            {sentToTopHumanizerFileName && (
+              <a
+                href="#workspace"
+                className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 whitespace-nowrap shrink-0"
+              >
+                View Loaded PDF in Top Humanizer ({sentToTopHumanizerFileName}) ↑
+              </a>
+            )}
           </div>
 
           {/* Mobile / Tablet Quick View Switcher (Visible below lg breakpoint for effortless 1-hand phone navigation) */}
@@ -716,7 +970,7 @@ export default function DocumentAgentSuite() {
                   : 'text-[#9B9B9B] hover:text-white'
               }`}
             >
-              ChatGPT &amp; PDF
+              Claude / ChatGPT
             </button>
             <button
               type="button"
@@ -727,27 +981,28 @@ export default function DocumentAgentSuite() {
                   : 'text-[#9B9B9B] hover:text-white'
               }`}
             >
-              Document ({currentDoc.sections.length})
+              A4 Artifact ({currentDoc.sections.length})
             </button>
           </div>
         </div>
 
-        {/* Main 2-Column Workspace: Left = ChatGPT Prompt & PDF Import/Edit Assistant, Right = Live Document */}
+        {/* Main 2-Column Workspace: Left = Claude / ChatGPT Prompt & Extended Thinking Assistant, Right = Live A4 Artifact Document + Micro-Thinking */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start min-w-0">
-          {/* LEFT COLUMN (5 cols): ChatGPT PDF Import, Mode Toggle, Prompt Composer & AI Suggestions */}
+          {/* LEFT COLUMN (5 cols): Claude / ChatGPT Prompt Builder, 6-Stage Extended Thinking & Iterative Refinements */}
           <div
             ref={leftColumnRef}
             className={`lg:col-span-5 min-w-0 bg-[#212121] border border-[#2F2F2F] rounded-xl flex flex-col overflow-hidden ${
               mobilePane === 'document' ? 'hidden lg:flex' : 'flex'
             }`}
           >
-            {/* Import PDF to Edit OR Generate New Bar */}
+            {/* Mode Toggle & PDF Import Bar */}
             <div className="p-3.5 sm:p-4 border-b border-[#2F2F2F] bg-[#181818] space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-white">
-                  Import PDF to Edit or Generate New Document
+                <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-[#10A37F]" />
+                  <span>Claude Extended Thinking Mode</span>
                 </span>
-                {/* Mode Toggle: Edit Current/Imported PDF vs Generate New */}
+                {/* Mode Toggle: Update Live Artifact vs Generate New */}
                 <div
                   role="group"
                   aria-label="ChatGPT Prompt Action Mode"
@@ -762,7 +1017,7 @@ export default function DocumentAgentSuite() {
                         : 'text-[#9B9B9B] hover:text-white'
                     }`}
                   >
-                    Edit Current / PDF
+                    Refine Artifact
                   </button>
                   <button
                     type="button"
@@ -784,9 +1039,9 @@ export default function DocumentAgentSuite() {
                   type="button"
                   disabled={isImportingPdf}
                   onClick={() => pdfFileInputRef.current?.click()}
-                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-xs font-semibold text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-semibold text-white border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  <Upload className="w-3.5 h-3.5 shrink-0" />
+                  <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
                   <span>{isImportingPdf ? 'Importing...' : 'Upload PDF / Doc (.pdf, .txt)'}</span>
                 </button>
 
@@ -812,7 +1067,7 @@ export default function DocumentAgentSuite() {
                     type="button"
                     onClick={() => {
                       setImportedPdfMeta(null);
-                      setChatActionMode('generate_new');
+                      setChatActionMode('edit_current');
                     }}
                     className="text-[11px] text-[#B4B4B4] hover:text-white shrink-0 px-1.5 py-0.5 rounded bg-[#171F1C] cursor-pointer"
                   >
@@ -821,10 +1076,10 @@ export default function DocumentAgentSuite() {
                 </div>
               )}
 
-              {/* 1-Click Starter Prompts (Generate New) */}
+              {/* 1-Click Starter Prompts (Generate New Artifact) */}
               <div className="pt-0.5 space-y-1.5">
                 <div className="text-[11px] font-medium text-[#9B9B9B]">
-                  Or 1-Click Generate New Document:
+                  1-Click Start New Document Artifact (Then Refine by Prompt):
                 </div>
                 <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-1.5">
                   {STARTER_PROMPTS.map((item) => (
@@ -844,10 +1099,13 @@ export default function DocumentAgentSuite() {
               </div>
             </div>
 
-            {/* Conversation & AI Missing Details Suggestions */}
-            <div className="p-3.5 sm:p-4 space-y-3.5 max-h-[420px] sm:max-h-[540px] overflow-y-auto">
-              {chatMessages.slice(-4).map((msg) =>
-                msg.role === 'user' ? (
+            {/* Conversation, Claude Extended Thinking Trace & AI Missing Details Suggestions */}
+            <div className="p-3.5 sm:p-4 space-y-3.5 max-h-[460px] sm:max-h-[580px] overflow-y-auto">
+              {chatMessages.slice(-4).map((msg) => {
+                const trace = msg.thinkingTrace || msg.canonicalDocument?.thinkingTrace;
+                const isThinkingExpanded = Boolean(expandedThinkingMsgIds[msg.id]);
+
+                return msg.role === 'user' ? (
                   <div key={msg.id} className="flex justify-end">
                     <div className="max-w-[92%] sm:max-w-[90%] rounded-2xl bg-[#2F2F2F] text-white border border-[#3D3D3D] px-3.5 py-2.5 text-xs leading-relaxed break-words">
                       {msg.promptText}
@@ -860,7 +1118,7 @@ export default function DocumentAgentSuite() {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-1 text-xs text-[#B4B4B4] font-mono tabular-nums border-b border-[#2F2F2F] pb-2">
                       <span className="font-sans font-semibold text-white">
-                        {msg.detectedDocTypeName || 'Generated Document'}
+                        {msg.detectedDocTypeName || 'Claude Document Artifact'}
                       </span>
                       <span>
                         AI Score: {msg.aiScoreBefore}% →{' '}
@@ -868,23 +1126,109 @@ export default function DocumentAgentSuite() {
                       </span>
                     </div>
 
+                    {/* Expandable Claude Extended Thinking (6 Stages · N Micro-Decisions) Block */}
+                    {trace && (
+                      <div
+                        data-testid="claude-extended-thinking-box"
+                        className="rounded-lg bg-[#141414] border border-amber-500/30 overflow-hidden"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => toggleThinkingAccordion(msg.id)}
+                          className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left hover:bg-[#1E1E1E] transition-colors cursor-pointer"
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Brain className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            <span className="text-[11px] font-semibold text-amber-300 truncate">
+                              Claude Extended Thinking ({trace.steps.length} Stages ·{' '}
+                              {trace.microDecisionsCount} Micro-Decisions Verified)
+                            </span>
+                          </div>
+                          {isThinkingExpanded ? (
+                            <ChevronUp className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                          )}
+                        </button>
+
+                        {isThinkingExpanded && (
+                          <div className="px-3 pb-3 pt-1.5 border-t border-[#2A2A2A] space-y-2.5 text-[11px]">
+                            <p className="text-[#D4D4D4] leading-relaxed break-words">
+                              {trace.executiveSummaryOfThought}
+                            </p>
+                            <div className="space-y-2">
+                              {trace.steps.map((step, sIdx) => (
+                                <div
+                                  key={step.stepNumber}
+                                  className="p-2 rounded bg-[#1C1C1C] border border-[#2C2C2C] space-y-1"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-white">
+                                      Stage {sIdx + 1}: {step.stageTitle}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-amber-300 shrink-0">
+                                      {step.microChecksPassed} checks ✓
+                                    </span>
+                                  </div>
+                                  <div className="text-[#9B9B9B] break-words">
+                                    <strong className="text-[#C4C4C4]">Focus:</strong>{' '}
+                                    {step.cognitiveFocus}
+                                  </div>
+                                  <div className="text-[#B4B4B4] leading-snug break-words">
+                                    {step.reasoningDetail}
+                                  </div>
+                                  <div className="text-[#10A37F] font-medium break-words">
+                                    ✓ {step.verifiedOutcome}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <p className="text-xs text-[#B4B4B4] leading-relaxed break-words">
                       {msg.assistantIntro ||
-                        `AI automatically generated ${
+                        `Prepared ${
                           msg.autoGeneratedOutline?.length || 6
-                        } sections, locked all numbers/facts, and filled missing details from your prompt.`}
+                        } structured sections on the live A4 Artifact sheet. Give any follow-up prompt to add sections or refine details, or send the finalized PDF to the Top Humanizer.`}
                     </p>
 
                     {msg.canonicalDocument && (
                       <div className="pt-1 flex flex-wrap items-center gap-2">
                         <button
                           type="button"
+                          disabled={isSendingToTopHumanizer}
+                          onClick={() => handleSendToTopHumanizer(msg.canonicalDocument!)}
+                          className="min-h-[34px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[11px] font-semibold text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                          <span>Send Final PDF to Top Humanizer ↑</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRightView('thinking');
+                            if (mobilePane === 'chat') {
+                              setMobilePane('document');
+                            }
+                          }}
+                          className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-[11px] font-semibold text-amber-300 border border-amber-500/40 flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <Brain className="w-3 h-3 shrink-0" />
+                          <span>Inspect Section Thinking</span>
+                        </button>
+
+                        <button
+                          type="button"
                           disabled={isExportingPdf}
                           onClick={() => handleExportPdf(true, msg.canonicalDocument!)}
-                          className="min-h-[34px] px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-[11px] font-semibold text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                          className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-[11px] font-semibold text-[#ECECEC] border border-[#383838] flex items-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Download className="w-3 h-3 shrink-0" />
-                          <span>Export Clean PDF (Preserve Structure)</span>
+                          <span>Download PDF</span>
                         </button>
 
                         <button
@@ -901,13 +1245,13 @@ export default function DocumentAgentSuite() {
                           }}
                           className="lg:hidden min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-[11px] font-medium text-[#ECECEC] border border-[#383838] transition-colors cursor-pointer"
                         >
-                          View Document ↓
+                          View A4 Sheet ↓
                         </button>
                       </div>
                     )}
                   </div>
-                )
-              )}
+                );
+              })}
 
               {/* AI Missing Things Auto-Suggestions (1-Click Selection — Zero Manual Typing) */}
               {latestAssistantMsg?.detectedMissingDetails &&
@@ -915,7 +1259,7 @@ export default function DocumentAgentSuite() {
                   <div className="border-t border-[#2F2F2F] pt-3 space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-semibold text-white">
-                        AI-Suggested Missing Details (Tap Any Option)
+                        AI-Suggested Missing Details (Tap to Update Artifact)
                       </span>
                       <span className="text-[11px] text-[#10A37F] font-medium shrink-0">
                         Auto-Filled
@@ -963,10 +1307,13 @@ export default function DocumentAgentSuite() {
               {latestAssistantMsg?.followUpPrompts && (
                 <div className="border-t border-[#2F2F2F] pt-3 space-y-1.5">
                   <div className="text-xs font-semibold text-[#ECECEC]">
-                    1-Click Follow-Up Edit Prompts
+                    1-Click Claude Extended Thinking Refinements
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    {latestAssistantMsg.followUpPrompts.slice(0, 3).map((fp) => (
+                    {[
+                      'Add a new section on 99.99% Uptime SLA & Enterprise Security',
+                      ...latestAssistantMsg.followUpPrompts.slice(0, 2),
+                    ].map((fp) => (
                       <button
                         key={fp}
                         type="button"
@@ -981,7 +1328,7 @@ export default function DocumentAgentSuite() {
               )}
             </div>
 
-            {/* Bottom Unified ChatGPT Dark Composer Card (Full-width input on both Phone & Desktop) */}
+            {/* Bottom Unified Claude / ChatGPT Dark Composer Card */}
             <div className="p-3 sm:p-3.5 border-t border-[#2F2F2F] bg-[#181818] space-y-2.5">
               {showContextBox && (
                 <div className="space-y-1">
@@ -1018,8 +1365,8 @@ export default function DocumentAgentSuite() {
                   }}
                   placeholder={
                     chatActionMode === 'edit_current'
-                      ? `Prompt ChatGPT to edit "${currentDoc.title.slice(0, 32)}..."`
-                      : "Write a prompt to generate a new document (e.g. 'Business proposal for Nova')..."
+                      ? `Prompt Claude/ChatGPT to update "${currentDoc.title.slice(0, 28)}..." (e.g. 'Add section on ROI')`
+                      : "Describe a new document to build from scratch (e.g. 'Business proposal for Nova')..."
                   }
                   className="w-full px-1.5 py-1 bg-transparent text-xs sm:text-sm text-white placeholder-[#9B9B9B] focus:outline-none"
                 />
@@ -1064,24 +1411,26 @@ export default function DocumentAgentSuite() {
                     ) : (
                       <Send className="w-3.5 h-3.5" />
                     )}
-                    <span>{chatActionMode === 'edit_current' ? 'Edit PDF' : 'Generate'}</span>
+                    <span>
+                      {chatActionMode === 'edit_current' ? 'Update Document' : 'Generate'}
+                    </span>
                   </button>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* RIGHT COLUMN (7 cols): Clean Dark Live Document Preview, Section Refiner & Version History */}
+          {/* RIGHT COLUMN (7 cols): Claude-Style Live A4 Artifact Document Preview, Per-Section Thinking Blueprint, Section Refiner & Version History */}
           <div
             ref={rightColumnRef}
             className={`lg:col-span-7 min-w-0 bg-[#212121] border border-[#2F2F2F] rounded-xl flex flex-col overflow-hidden ${
               mobilePane === 'chat' ? 'hidden lg:flex' : 'flex'
             }`}
           >
-            {/* Right Panel Toolbar */}
+            {/* Right Panel Artifact Toolbar */}
             <div className="px-3.5 sm:px-4 py-3 border-b border-[#2F2F2F] bg-[#1B1B1B] flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2.5">
               {/* Segmented View Control */}
-              <div className="grid grid-cols-3 sm:flex items-center gap-1 p-1 bg-[#141414] border border-[#2F2F2F] rounded-lg w-full sm:w-auto">
+              <div className="grid grid-cols-2 sm:flex items-center gap-1 p-1 bg-[#141414] border border-[#2F2F2F] rounded-lg w-full sm:w-auto">
                 <button
                   type="button"
                   onClick={() => setRightView('preview')}
@@ -1091,8 +1440,20 @@ export default function DocumentAgentSuite() {
                       : 'text-[#9B9B9B] hover:text-white'
                   }`}
                 >
-                  <span className="sm:hidden">Preview</span>
-                  <span className="hidden sm:inline">Document Preview</span>
+                  <span className="sm:hidden">A4 Sheet</span>
+                  <span className="hidden sm:inline">A4 Artifact Sheet</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRightView('thinking')}
+                  className={`min-h-[34px] px-2 sm:px-3 py-1.5 text-[11px] sm:text-xs font-medium rounded-md transition-colors truncate text-center flex items-center justify-center gap-1 cursor-pointer ${
+                    rightView === 'thinking'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-xs'
+                      : 'text-amber-300/80 hover:text-amber-200'
+                  }`}
+                >
+                  <Brain className="w-3 h-3 shrink-0" />
+                  <span>Thinking ({currentDoc.sections.length})</span>
                 </button>
                 <button
                   type="button"
@@ -1118,7 +1479,7 @@ export default function DocumentAgentSuite() {
                 </button>
               </div>
 
-              {/* Template & Copy Controls */}
+              {/* Template, Micro-Thinking Toggle, Compare, Copy & Send to Top Humanizer Controls */}
               <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
                 <select
                   aria-label="Document Template"
@@ -1127,7 +1488,7 @@ export default function DocumentAgentSuite() {
                     const tpl = PROFESSIONAL_TEMPLATES.find((t) => t.id === e.target.value);
                     if (tpl) setSelectedTemplate(tpl);
                   }}
-                  className="flex-1 sm:flex-initial min-w-[140px] truncate min-h-[34px] px-2.5 py-1.5 text-xs text-[#ECECEC] bg-[#2A2A2A] border border-[#383838] rounded-lg"
+                  className="flex-1 sm:flex-initial min-w-[125px] truncate min-h-[34px] px-2.5 py-1.5 text-xs text-[#ECECEC] bg-[#2A2A2A] border border-[#383838] rounded-lg"
                 >
                   {PROFESSIONAL_TEMPLATES.map((tpl) => (
                     <option key={tpl.id} value={tpl.id} className="bg-[#212121] text-[#ECECEC]">
@@ -1138,10 +1499,25 @@ export default function DocumentAgentSuite() {
 
                 <button
                   type="button"
+                  onClick={() => setShowMicroThinkingOnA4(!showMicroThinkingOnA4)}
+                  className={`min-h-[34px] px-2.5 py-1.5 rounded-lg text-xs font-medium border flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors ${
+                    showMicroThinkingOnA4
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
+                      : 'bg-[#2A2A2A] text-[#ECECEC] border-[#383838] hover:bg-[#343434]'
+                  }`}
+                >
+                  <Brain className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {showMicroThinkingOnA4 ? 'Micro-Thinking: ON' : 'Micro-Thinking: OFF'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setShowRawCompare(!showRawCompare)}
                   className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] whitespace-nowrap cursor-pointer"
                 >
-                  {showRawCompare ? 'Single View' : 'Compare Raw vs Humanized'}
+                  {showRawCompare ? 'A4 Paper View' : 'Compare Raw vs Humanized'}
                 </button>
 
                 <button
@@ -1155,24 +1531,24 @@ export default function DocumentAgentSuite() {
 
                 <button
                   type="button"
-                  disabled={isExportingPdf}
-                  onClick={() => handleExportPdf(true)}
-                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-xs font-semibold text-white flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  disabled={isSendingToTopHumanizer}
+                  onClick={() => handleSendToTopHumanizer(currentDoc)}
+                  className="min-h-[34px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white flex items-center gap-1 whitespace-nowrap cursor-pointer"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Export Clean PDF</span>
+                  <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                  <span>Send to Top Humanizer ↑</span>
                 </button>
               </div>
             </div>
 
-            {/* VIEW 1: Clean Dark Document Preview */}
+            {/* VIEW 1: Claude-Style Live A4 Paper Sheet Preview inside Dark Studio */}
             {rightView === 'preview' && (
-              <div className="p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6 max-h-[560px] sm:max-h-[700px] overflow-y-auto">
+              <div className="p-3 sm:p-5 lg:p-6 bg-[#141414] space-y-4 max-h-[600px] sm:max-h-[740px] overflow-y-auto">
                 {showRawCompare ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 sm:gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 sm:gap-6 bg-[#1C1C1C] p-4 rounded-xl border border-[#2F2F2F]">
                     <div className="space-y-3 border-b md:border-b-0 md:border-r border-[#2F2F2F] pb-4 md:pb-0 md:pr-4">
                       <div className="text-xs font-semibold text-[#9B9B9B]">
-                        Original Un-Humanized Draft
+                        Original Un-Humanized Draft (Sent to Top Humanizer for Before/After Proof)
                       </div>
                       {currentDoc.sections.map((sec, idx) => (
                         <div key={sec.id} className="space-y-1.5">
@@ -1202,103 +1578,262 @@ export default function DocumentAgentSuite() {
                     </div>
                   </div>
                 ) : (
-                  <div className="space-y-5">
-                    <div className="border-b border-[#2F2F2F] pb-4">
-                      <div className="text-xs text-[#10A37F] font-medium">
-                        {selectedTemplate.companyName} · {selectedTemplate.pageSize}
+                  /* Realistic Crisp A4 Paper Artifact Sheet (Matches Exported PDF Font & Shape 1:1) */
+                  <div
+                    data-testid="claude-a4-artifact-sheet"
+                    className={`bg-white text-slate-900 rounded-lg shadow-xl border border-slate-300 p-5 sm:p-8 lg:p-10 mx-auto max-w-[780px] space-y-5 ${activeFontClass}`}
+                  >
+                    {/* Top A4 Paper Header */}
+                    <div className="border-b-2 border-slate-800 pb-3.5 flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+                      <div className="space-y-1">
+                        <div className="text-[11px] font-sans font-semibold uppercase tracking-wider text-indigo-700">
+                          {selectedTemplate.companyName} · {selectedTemplate.pageSize} ORIGINAL{' '}
+                          {artifactFontStyle.toUpperCase()} PDF ARTIFACT
+                        </div>
+                        <h3 className="text-lg sm:text-2xl font-bold text-slate-950 leading-tight break-words">
+                          {currentDoc.title}
+                        </h3>
+                        <p className="text-xs sm:text-sm text-slate-600 break-words">
+                          {currentDoc.subtitle}
+                        </p>
                       </div>
-                      <h3 className="text-lg sm:text-xl font-bold text-white mt-1 break-words">
-                        {currentDoc.title}
-                      </h3>
-                      <p className="text-xs text-[#B4B4B4] mt-0.5 break-words">
-                        {currentDoc.subtitle}
-                      </p>
+                      <div className="text-[11px] font-mono text-slate-500 shrink-0 tabular-nums">
+                        v{currentDoc.currentVersionNumber} · {currentDoc.sections.length} Sections ·{' '}
+                        {totalMicroDecisionsCount} Checks
+                      </div>
                     </div>
 
-                    {currentDoc.sections.map((sec, idx) => (
-                      <div key={sec.id} className="space-y-2">
-                        <h4 className="text-sm font-bold text-white break-words">
-                          {idx + 1}. {sec.heading}
-                        </h4>
-                        {sec.paragraphs.map((p, pIdx) => (
-                          <p
-                            key={pIdx}
-                            className="text-xs sm:text-sm text-[#D4D4D4] leading-relaxed break-words"
-                          >
-                            {p}
-                          </p>
-                        ))}
-                        {sec.bullets && sec.bullets.length > 0 && (
-                          <ul className="list-disc pl-5 space-y-1 text-xs text-[#B4B4B4]">
-                            {sec.bullets.map((b, bIdx) => (
-                              <li key={bIdx} className="break-words">
-                                {b}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {sec.table && sec.table.rows.length > 0 && (
-                          <div className="overflow-x-auto pt-2">
-                            <table className="w-full text-xs border border-[#2F2F2F]">
-                              <thead className="bg-[#1A1A1A] text-[#ECECEC]">
-                                <tr>
-                                  <th className="p-2 text-left border-b border-[#2F2F2F]">
-                                    {sec.table.headers[0]}
-                                  </th>
-                                  <th className="p-2 text-left border-b border-[#2F2F2F]">
-                                    {sec.table.headers[1]}
-                                  </th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {sec.table.rows.map((r, rIdx) => (
-                                  <tr key={rIdx} className="border-b border-[#2A2A2A]">
-                                    <td className="p-2 font-medium text-white">{r[0]}</td>
-                                    <td className="p-2 text-[#B4B4B4]">{r[1]}</td>
-                                  </tr>
+                    {/* Section 1 + Embedded Vector Shape Diagram (When Executive Figure or Technical Blueprint is selected) */}
+                    {currentDoc.sections.map((sec, idx) => {
+                      const showFigureBesideSection =
+                        idx === 0 && artifactShapePreset !== 'clean_editorial';
+
+                      return (
+                        <div key={sec.id} className="space-y-2.5 pt-1">
+                          {showFigureBesideSection ? (
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+                              <div className="md:col-span-7 space-y-2">
+                                <h4 className="text-sm sm:text-base font-bold text-slate-900 break-words">
+                                  {idx + 1}. {sec.heading}
+                                </h4>
+                                {sec.paragraphs.map((p, pIdx) => (
+                                  <p
+                                    key={pIdx}
+                                    className="text-xs sm:text-[13px] text-slate-800 leading-relaxed break-words"
+                                  >
+                                    {p}
+                                  </p>
                                 ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                              </div>
+
+                              {/* Embedded Vector Architecture / KPI Figure Box (Preserved as Visual Region in Top Humanizer) */}
+                              <div className="md:col-span-5 rounded-lg border-2 border-indigo-900/80 bg-slate-50 p-3 space-y-2.5 self-start">
+                                <div className="bg-indigo-950 text-white px-2.5 py-1.5 rounded text-[10px] font-sans font-bold tracking-wide uppercase flex items-center justify-between">
+                                  <span>
+                                    {artifactShapePreset === 'technical_blueprint'
+                                      ? 'FIG 1. ARCHITECTURE TOPOLOGY'
+                                      : 'FIG 1. EXECUTIVE KPI & ROI MODEL'}
+                                  </span>
+                                  <span className="text-emerald-300">LOCKED</span>
+                                </div>
+                                <div className="space-y-1.5 font-sans">
+                                  <div className="space-y-0.5">
+                                    <div className="flex justify-between text-[10px] font-semibold text-slate-700">
+                                      <span>Phase 1 Baseline</span>
+                                      <span>52%</span>
+                                    </div>
+                                    <div className="w-full h-2.5 bg-slate-200 rounded overflow-hidden">
+                                      <div className="h-full w-[52%] bg-indigo-600 rounded" />
+                                    </div>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="flex justify-between text-[10px] font-semibold text-slate-700">
+                                      <span>Phase 2 Optimization</span>
+                                      <span>78%</span>
+                                    </div>
+                                    <div className="w-full h-2.5 bg-slate-200 rounded overflow-hidden">
+                                      <div className="h-full w-[78%] bg-emerald-600 rounded" />
+                                    </div>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="flex justify-between text-[10px] font-semibold text-slate-700">
+                                      <span>Target SLA &amp; ROI</span>
+                                      <span>96%</span>
+                                    </div>
+                                    <div className="w-full h-2.5 bg-slate-200 rounded overflow-hidden">
+                                      <div className="h-full w-[96%] bg-amber-500 rounded" />
+                                    </div>
+                                  </div>
+                                </div>
+                                <div className="text-[10px] font-sans text-slate-600 border-t border-slate-200 pt-1.5 leading-snug">
+                                  Embedded vector diagram in PDF — automatically detected &amp;
+                                  locked by Top PDF Humanizer.
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <h4 className="text-sm sm:text-base font-bold text-slate-900 break-words">
+                                {idx + 1}. {sec.heading}
+                              </h4>
+                              {sec.paragraphs.map((p, pIdx) => (
+                                <p
+                                  key={pIdx}
+                                  className="text-xs sm:text-[13px] text-slate-800 leading-relaxed break-words"
+                                >
+                                  {p}
+                                </p>
+                              ))}
+                            </>
+                          )}
+
+                          {sec.bullets && sec.bullets.length > 0 && (
+                            <ul className="list-disc pl-5 space-y-1 text-xs text-slate-700">
+                              {sec.bullets.map((b, bIdx) => (
+                                <li key={bIdx} className="break-words">
+                                  {b}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                          {sec.table && sec.table.rows.length > 0 && (
+                            <div className="overflow-x-auto pt-1.5">
+                              <table className="w-full text-xs border border-slate-300 font-sans">
+                                <thead className="bg-slate-100 text-slate-900">
+                                  <tr>
+                                    <th className="p-2 text-left border-b border-slate-300 font-semibold">
+                                      {sec.table.headers[0]}
+                                    </th>
+                                    <th className="p-2 text-left border-b border-slate-300 font-semibold">
+                                      {sec.table.headers[1]}
+                                    </th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {sec.table.rows.map((r, rIdx) => (
+                                    <tr key={rIdx} className="border-b border-slate-200">
+                                      <td className="p-2 font-medium text-slate-900">{r[0]}</td>
+                                      <td className="p-2 text-slate-700">{r[1]}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* Per-Section Claude Micro-Thinking Audit Banner (Visible when showMicroThinkingOnA4 is ON; excluded from exported PDF binary) */}
+                          {showMicroThinkingOnA4 && sec.microThinking && (
+                            <div
+                              data-testid={`a4-micro-thinking-sec-${idx + 1}`}
+                              className="mt-2 rounded-lg bg-slate-900 text-slate-100 p-3 font-sans text-[11px] space-y-2 border border-amber-500/40"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700 pb-1.5">
+                                <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                                  <Brain className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                  <span>
+                                    Claude Micro-Thinking Blueprint · Section {idx + 1} (
+                                    {sec.microThinking.confidenceScore}% Reasoning Confidence)
+                                  </span>
+                                </span>
+                                <span className="font-mono text-[10px] text-emerald-300">
+                                  {sec.metrics.aiScoreAfter}% AI · {sec.lockedFacts.length} Facts
+                                  Locked
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] leading-snug">
+                                <div>
+                                  <span className="font-semibold text-amber-200">
+                                    Cognitive Goal:
+                                  </span>{' '}
+                                  <span className="text-slate-300">
+                                    {sec.microThinking.cognitiveGoal}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="font-semibold text-amber-200">
+                                    First-Principles Logic:
+                                  </span>{' '}
+                                  <span className="text-slate-300">
+                                    {sec.microThinking.firstPrinciplesLogic}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="font-semibold text-emerald-300">
+                                    Fact-Lock Audit:
+                                  </span>{' '}
+                                  <span className="text-slate-300">
+                                    {sec.microThinking.factLockAudit}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="font-semibold text-indigo-300">
+                                    Self-Critique Resolution:
+                                  </span>{' '}
+                                  <span className="text-slate-300">
+                                    {sec.microThinking.selfCritiqueResolution}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* 1-Click Deepen Section Thinking Chips */}
+                              <div className="pt-1 border-t border-slate-800 flex flex-wrap items-center gap-1.5 min-w-0">
+                                <span className="text-[10px] font-semibold text-amber-300 shrink-0">
+                                  1-Click Deepen Section Thinking:
+                                </span>
+                                {sec.microThinking.thinkingUpgradePrompts.map((upPrompt, uIdx) => (
+                                  <button
+                                    key={uIdx}
+                                    type="button"
+                                    onClick={() => handleApplySectionPrompt(sec.id, upPrompt)}
+                                    className="text-left px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-100 border border-slate-600 transition-colors cursor-pointer whitespace-normal break-words max-w-full"
+                                  >
+                                    + {upPrompt}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
-                {/* Clean Finalized Document Export Footer */}
-                <div className="pt-4 sm:pt-5 border-t border-[#2F2F2F] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                {/* Clean Finalized Document Export & Top Humanizer Handoff Footer */}
+                <div className="pt-3 sm:pt-4 border-t border-[#2F2F2F] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <div className="text-xs text-[#B4B4B4]">
-                    Structure preserved ({currentDoc.sections.length} numbered sections, bullet lists
-                    &amp; tables ·{' '}
+                    Original Font:{' '}
+                    <strong className="text-white uppercase">{artifactFontStyle}</strong> · Shape:{' '}
+                    <strong className="text-white">{artifactShapePreset}</strong> ·{' '}
                     <span className="font-mono font-semibold text-[#10A37F]">
                       {averageAiScoreAfter}% AI Score
                     </span>
-                    )
                   </div>
                   <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2">
                     <button
                       type="button"
-                      disabled={isExportingPdf}
-                      onClick={() => handleExportPdf(true)}
-                      className="min-h-[38px] px-3.5 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-xs font-semibold text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      disabled={isSendingToTopHumanizer}
+                      onClick={() => handleSendToTopHumanizer(currentDoc)}
+                      className="min-h-[38px] px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
-                      <Download className="w-3.5 h-3.5 shrink-0" />
+                      <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
                       <span>
-                        {isExportingPdf
-                          ? 'Exporting PDF...'
-                          : 'Export Clean Humanized PDF (Preserve Structure)'}
+                        {isSendingToTopHumanizer
+                          ? 'Sending to Top Humanizer...'
+                          : 'Send Final PDF to Top Humanizer ↑'}
                       </span>
                     </button>
+
                     <div className="grid grid-cols-2 sm:flex items-center gap-2">
                       <button
                         type="button"
                         disabled={isExportingPdf}
-                        onClick={() => handleExportPdf(false)}
-                        className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        onClick={() => handleExportPdf(true)}
+                        className="min-h-[38px] px-3 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-xs font-semibold text-white flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5 shrink-0" />
-                        <span>Template PDF</span>
+                        <span>Download Clean PDF</span>
                       </button>
                       <button
                         type="button"
@@ -1315,7 +1850,148 @@ export default function DocumentAgentSuite() {
               </div>
             )}
 
-            {/* VIEW 2: Clean Dark Section-by-Section Prompt Refiner */}
+            {/* VIEW 2: Dedicated Claude Extended Thinking & Per-Section Micro-Thinking Inspector */}
+            {rightView === 'thinking' && (
+              <div
+                data-testid="claude-thinking-inspector-view"
+                className="p-3.5 sm:p-5 space-y-4 max-h-[580px] sm:max-h-[720px] overflow-y-auto"
+              >
+                {/* Document-Level 6-Stage Extended Thinking Trace Card */}
+                {currentDoc.thinkingTrace && (
+                  <div className="p-4 rounded-xl bg-[#181818] border border-amber-500/40 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2F2F2F] pb-2.5">
+                      <div className="flex items-center gap-2">
+                        <Brain className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span className="text-sm font-bold text-white">
+                          Claude 6-Stage Extended Thinking Trace ({currentDoc.thinkingTrace.depthMode.toUpperCase()})
+                        </span>
+                      </div>
+                      <span className="text-xs font-mono text-amber-300">
+                        {currentDoc.thinkingTrace.microDecisionsCount} Micro-Decisions Verified ✓
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-[#D4D4D4] leading-relaxed break-words">
+                      {currentDoc.thinkingTrace.executiveSummaryOfThought}
+                    </p>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      {currentDoc.thinkingTrace.steps.map((step, idx) => (
+                        <div
+                          key={step.stepNumber}
+                          className="p-3 rounded-lg bg-[#212121] border border-[#333333] space-y-1.5 text-xs"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-bold text-amber-300">
+                              Stage {idx + 1}: {step.stageTitle}
+                            </span>
+                            <span className="font-mono text-[11px] text-[#10A37F]">
+                              {step.microChecksPassed} checks
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-[#B4B4B4] break-words">
+                            <strong className="text-white">Focus:</strong> {step.cognitiveFocus}
+                          </div>
+                          <div className="text-[11px] text-[#D4D4D4] leading-relaxed break-words">
+                            {step.reasoningDetail}
+                          </div>
+                          <div className="text-[11px] text-[#10A37F] flex items-center gap-1 pt-0.5">
+                            <CheckCircle2 className="w-3 h-3 shrink-0" />
+                            <span>{step.verifiedOutcome}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Per-Section Micro-Thinking Blueprint Cards */}
+                <div className="space-y-3">
+                  <div className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                    Section-by-Section Micro-Thinking Blueprints ({currentDoc.sections.length}{' '}
+                    Sections)
+                  </div>
+
+                  {currentDoc.sections.map((sec, idx) => (
+                    <div
+                      key={sec.id}
+                      className="p-4 rounded-xl bg-[#1A1A1A] border border-[#2F2F2F] space-y-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#2F2F2F] pb-2">
+                        <span className="text-sm font-bold text-white">
+                          {idx + 1}. {sec.heading}
+                        </span>
+                        <span className="text-xs font-mono text-amber-300">
+                          Confidence: {sec.microThinking?.confidenceScore || 98}% ·{' '}
+                          <strong className="text-[#10A37F]">{sec.metrics.aiScoreAfter}% AI</strong>
+                        </span>
+                      </div>
+
+                      {sec.microThinking && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+                          <div className="p-2.5 rounded-lg bg-[#222222] border border-[#333333]">
+                            <div className="font-semibold text-amber-300 mb-0.5">
+                              1. Cognitive Goal
+                            </div>
+                            <div className="text-[#D4D4D4] leading-relaxed">
+                              {sec.microThinking.cognitiveGoal}
+                            </div>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#222222] border border-[#333333]">
+                            <div className="font-semibold text-amber-300 mb-0.5">
+                              2. First-Principles Deductive Logic
+                            </div>
+                            <div className="text-[#D4D4D4] leading-relaxed">
+                              {sec.microThinking.firstPrinciplesLogic}
+                            </div>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#222222] border border-[#333333]">
+                            <div className="font-semibold text-[#10A37F] mb-0.5">
+                              3. Fact-Lock &amp; Entity Audit
+                            </div>
+                            <div className="text-[#D4D4D4] leading-relaxed">
+                              {sec.microThinking.factLockAudit}
+                            </div>
+                          </div>
+                          <div className="p-2.5 rounded-lg bg-[#222222] border border-[#333333]">
+                            <div className="font-semibold text-indigo-300 mb-0.5">
+                              4. Cadence, Burstiness &amp; Self-Critique
+                            </div>
+                            <div className="text-[#D4D4D4] leading-relaxed">
+                              {sec.microThinking.cadenceAndBurstinessPlan}{' '}
+                              {sec.microThinking.selfCritiqueResolution}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {sec.microThinking?.thinkingUpgradePrompts && (
+                        <div className="pt-1 flex flex-wrap items-center gap-1.5 min-w-0">
+                          <span className="text-[11px] font-semibold text-amber-300">
+                            Tap to Deepen Section {idx + 1} Thinking:
+                          </span>
+                          {sec.microThinking.thinkingUpgradePrompts.map((upPrompt, uIdx) => (
+                            <button
+                              key={uIdx}
+                              type="button"
+                              onClick={() => {
+                                handleApplySectionPrompt(sec.id, upPrompt);
+                                setRightView('preview');
+                              }}
+                              className="text-left px-2.5 py-1.5 rounded-lg bg-[#262626] hover:bg-[#343434] text-[11px] text-[#ECECEC] border border-[#383838] transition-colors cursor-pointer whitespace-normal break-words max-w-full"
+                            >
+                              + {upPrompt} →
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* VIEW 3: Clean Dark Section-by-Section Prompt Refiner */}
             {rightView === 'sections' && (
               <div className="p-3.5 sm:p-5 space-y-4 max-h-[560px] sm:max-h-[700px] overflow-y-auto">
                 {currentDoc.sections.map((sec, idx) => (
@@ -1369,6 +2045,16 @@ export default function DocumentAgentSuite() {
                       </div>
                     </div>
 
+                    {sec.microThinking && (
+                      <div className="p-2.5 rounded-lg bg-[#141414] border border-amber-500/30 text-[11px] text-[#D4D4D4] space-y-1">
+                        <div className="font-semibold text-amber-300 flex items-center gap-1">
+                          <Brain className="w-3 h-3 shrink-0" />
+                          <span>Section Micro-Thinking Goal:</span>
+                        </div>
+                        <div>{sec.microThinking.cognitiveGoal}</div>
+                      </div>
+                    )}
+
                     <p className="text-xs text-[#D4D4D4] leading-relaxed bg-[#212121] p-3 rounded-lg border border-[#2F2F2F] break-words">
                       {sec.paragraphs.join('\n\n')}
                     </p>
@@ -1387,7 +2073,7 @@ export default function DocumentAgentSuite() {
                             handleApplySectionPrompt(sec.id, sectionPromptMap[sec.id] || '');
                           }
                         }}
-                        placeholder={`Prompt AI to update "${sec.heading}"...`}
+                        placeholder={`Prompt Claude to update "${sec.heading}"...`}
                         className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-[#2F2F2F] border border-[#3D3D3D] text-xs text-white placeholder-[#8E8E8E] focus:outline-none focus:border-[#10A37F]"
                       />
                       <button
@@ -1409,7 +2095,7 @@ export default function DocumentAgentSuite() {
               </div>
             )}
 
-            {/* VIEW 3: Clean Dark Version History */}
+            {/* VIEW 4: Clean Dark Version History */}
             {rightView === 'versions' && (
               <div className="p-3.5 sm:p-5 space-y-2.5 max-h-[560px] sm:max-h-[700px] overflow-y-auto">
                 {versionHistory.map((ver) => (

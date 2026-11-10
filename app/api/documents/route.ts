@@ -8,12 +8,14 @@ import {
   AudienceLevel,
   runControlledHumanizePipeline,
   CanonicalDocumentModel,
+  ClaudeThinkingDepthMode,
+  synthesizeSectionProseAndMicroThinking,
 } from '@/lib/document-agent-engine';
 
 /**
  * Section 4, 9, 10, 12 & 13 — Backend API Flow (`POST /api/documents`):
  * Supports both:
- * 1. ChatGPT-Style Conversational Content & Document Generation (`mode: 'chatgpt'`)
+ * 1. ChatGPT / Claude Extended Thinking Conversational Content & Document Generation (`mode: 'chatgpt'`)
  * 2. Smart Form + Outline Wizard Generation (`mode: 'wizard'`)
  * Uses `gemini-3.8-flash` on the server with automatic deterministic Controlled Humanizer fallback.
  */
@@ -32,6 +34,7 @@ export async function POST(req: NextRequest) {
       lengthTarget = 'Medium (2–3 Pages)',
       customOutline,
       useGeminiRefinement = true,
+      depthMode = 'extended_deep',
     } = body as {
       mode?: 'wizard' | 'chatgpt';
       prompt?: string;
@@ -44,11 +47,12 @@ export async function POST(req: NextRequest) {
       lengthTarget?: string;
       customOutline?: string[];
       useGeminiRefinement?: boolean;
+      depthMode?: ClaudeThinkingDepthMode;
     };
 
     const apiKey = process.env.GEMINI_API_KEY;
 
-    // MODE 1: ChatGPT-Style Conversational AI Content Generator + Humanizer
+    // MODE 1: ChatGPT / Claude Extended Thinking Conversational AI Content Generator + Humanizer
     if (mode === 'chatgpt') {
       const baseChatReply = generateChatGptStyleResponse({
         prompt: chatPrompt,
@@ -56,6 +60,7 @@ export async function POST(req: NextRequest) {
         tone,
         audience,
         lengthTarget,
+        depthMode,
       });
 
       let engineUsed = 'controlled-humanizer-pipeline';
@@ -70,18 +75,20 @@ export async function POST(req: NextRequest) {
       ) {
         try {
           const ai = new GoogleGenAI({ apiKey });
-          const systemInstruction = `You are a ChatGPT-style AI Document & Content Generator with a built-in Controlled Humanizer (<10% AI detector score).
-Follow the user's prompt in English, Urdu, or Roman Urdu and transform any provided input content accurately.
+          const systemInstruction = `You are a Claude Extended Thinking + ChatGPT-style AI Document & Content Architect with a built-in Controlled Humanizer (<10% AI detector score).
+Follow the user's prompt in English, Urdu, or Roman Urdu and transform any provided input content accurately using deep first-principles reasoning (${depthMode}).
 STRICT RULES:
 1. Never invent fake statistics or alter numbers/dates/names from the user's input.
-2. Write in a natural, grounded human voice (${tone} tone for ${audience}) with varied sentence lengths, contractions where natural, and zero robotic clichés ("delve", "testament", "tapestry", "furthermore", "moreover", "underscore").
-3. Return valid JSON matching the requested schema.`;
+2. Make every section genuinely distinct with non-repetitive, first-principles prose.
+3. Write in a natural, grounded human voice (${tone} tone for ${audience}) with varied sentence lengths, contractions where natural, and zero robotic clichés ("delve", "testament", "tapestry", "furthermore", "moreover", "underscore").
+4. Return valid JSON matching the requested schema.`;
 
           const userMessage = `User Prompt: ${chatPrompt}
 ${inputContext ? `\nInput Content / Source Text to Process:\n${inputContext}` : ''}
 Target Tone: ${tone}
 Target Audience: ${audience}
 Target Length: ${lengthTarget}
+Claude Thinking Depth Mode: ${depthMode}
 
 Return JSON:
 {
@@ -115,6 +122,11 @@ Return JSON:
               inputTokens = Math.round(userMessage.length / 4);
               outputTokens = Math.round(rawJson.length / 4);
 
+              const docType =
+                DOCUMENT_TYPE_CATALOG.find(
+                  (d) => d.id === baseChatReply.canonicalDocument!.documentTypeId
+                ) || DOCUMENT_TYPE_CATALOG[3];
+
               const updatedSections = parsed.sections.map(
                 (
                   sec: { heading?: string; paragraphs?: string[]; bullets?: string[] },
@@ -125,6 +137,22 @@ Return JSON:
                       ? sec.paragraphs
                       : baseChatReply.canonicalDocument!.sections[idx]?.originalParagraphs || [];
                   const pipeline = runControlledHumanizePipeline(rawParas, tone, audience);
+                  const existingMicro =
+                    baseChatReply.canonicalDocument!.sections[idx]?.microThinking ||
+                    synthesizeSectionProseAndMicroThinking({
+                      heading: sec.heading || `Section ${idx + 1}`,
+                      sectionIndex: idx,
+                      totalSections: parsed.sections.length,
+                      docType,
+                      topicOrPrompt: chatPrompt || docType.name,
+                      primaryFactLabel: docType.fields[0]?.label || 'Primary Specification',
+                      primaryFactValue:
+                        baseChatReply.detectedMissingDetails?.[0]?.aiAutoFilledValue ||
+                        docType.name,
+                      tone,
+                      audience,
+                      depthMode,
+                    }).microThinking;
 
                   return {
                     id: `chat-sec-${idx + 1}`,
@@ -141,6 +169,7 @@ Return JSON:
                       burstinessAfter: pipeline.burstinessAfter,
                       meaningPreserved: pipeline.meaningPreserved,
                     },
+                    microThinking: existingMicro,
                   };
                 }
               );
@@ -202,6 +231,7 @@ Return JSON:
       tone,
       audience,
       lengthTarget,
+      depthMode,
     });
 
     let engineUsed = 'controlled-humanizer-pipeline';
@@ -303,6 +333,7 @@ Return a JSON object with:
                     burstinessAfter: pipeline.burstinessAfter,
                     meaningPreserved: pipeline.meaningPreserved,
                   },
+                  microThinking: baseCanonicalDoc.sections[idx]?.microThinking,
                 };
               }
             );
