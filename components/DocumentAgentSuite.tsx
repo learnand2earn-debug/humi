@@ -22,7 +22,6 @@ import {
 import {
   DOCUMENT_TYPE_CATALOG,
   PROFESSIONAL_TEMPLATES,
-  SAMPLE_IMPORTED_PDF_DATA,
   SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
   AgentRewriteTone,
   AudienceLevel,
@@ -34,10 +33,10 @@ import {
   ArtifactPdfShapePreset,
   ClaudeThinkingDepthMode,
   PipelineUploadedDocument,
-  generateChatGptStyleResponse,
   applyPromptToDocumentOrSection,
-  buildCanonicalDocumentFromImportedText,
   ingestMultipleFilesIntoPipeline,
+  generateNextUnlimitedPipelineDocument,
+  analyzeMultiDocumentPipeline,
   executeMultiDocPromptPipeline,
   runControlledHumanizePipeline,
   applyEditorQuickAction,
@@ -125,6 +124,10 @@ export default function DocumentAgentSuite() {
   // Keep thinking accordion collapsed by default so chat replies and prompt outputs are always immediately visible
   const [expandedThinkingMsgIds, setExpandedThinkingMsgIds] = useState<Record<string, boolean>>({});
   const [expandedPipelineDocIds, setExpandedPipelineDocIds] = useState<Record<string, boolean>>({});
+  const [activePipelineStep, setActivePipelineStep] = useState<1 | 2 | 3 | 4 | 5>(4);
+  const [showInlineFileCreator, setShowInlineFileCreator] = useState<boolean>(false);
+  const [customFileNameInput, setCustomFileNameInput] = useState<string>('');
+  const [customFileContentInput, setCustomFileContentInput] = useState<string>('');
   const [isDraggingOverPipeline, setIsDraggingOverPipeline] = useState<boolean>(false);
   const uploadModeRef = useRef<'append' | 'replace'>('append');
 
@@ -148,7 +151,7 @@ export default function DocumentAgentSuite() {
   const [chatActionMode, setChatActionMode] = useState<'edit_current' | 'generate_new'>(
     'edit_current'
   );
-  // Multi-Document Ingestion, Reading & Analysis Pipeline state (pre-loaded with 3 realistic documents ready for immediate multi-doc prompting)
+  // Unlimited Continuous Multi-Document Ingestion, Reading & Analysis Pipeline state
   const [uploadedDocsPipeline, setUploadedDocsPipeline] = useState<PipelineUploadedDocument[]>(
     () => SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK
   );
@@ -157,7 +160,7 @@ export default function DocumentAgentSuite() {
     pageCount: number;
     sectionCount: number;
   } | null>(() => ({
-    fileName: `${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length} Documents in Pipeline (${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
+    fileName: `${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length} Documents in Unlimited Pipeline (${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
     pageCount: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.reduce((s, d) => s + d.pageCount, 0),
     sectionCount: 5,
   }));
@@ -173,16 +176,16 @@ export default function DocumentAgentSuite() {
   const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
   const [sectionPromptMap, setSectionPromptMap] = useState<Record<string, string>>({});
   const [statusMessage, setStatusMessage] = useState<string>(
-    'Multi-Document Pipeline Active (3 Files Read & Analyzed · 6 Pages · 18 Locked Facts) — Upload your own files or enter any prompt below to analyze, compare, summarize, or build your document.'
+    '5-Step Unlimited Multi-Document Pipeline Active (∞ Continuous File Queue) — Keep adding unlimited files (.pdf, .docx, .txt, .csv, or inline text) or enter any prompt below.'
   );
 
   const [chatMessages, setChatMessages] = useState<ChatGptMessage[]>(() => {
     const initialPromptText =
-      'Mujhe digital marketing agency (Apex Growth Digital) ke liye client Nova Retail Group ka complete Business Proposal chahiye — teeno uploaded documents (Client RFP, Financial ROI Forecast, aur 99.99% SLA Spec) ko read aur analyze kar ke ($8,500/month retainer, 12 weeks timeline, scale ROAS from 2.1x to 4.0x).';
+      'Mujhe digital marketing agency (Apex Growth Digital) ke liye client Nova Retail Group ka complete Business Proposal chahiye — sab uploaded documents ko 5-step pipeline main read aur analyze kar ke ($8,500/month retainer, 12 weeks timeline, scale ROAS from 2.1x to 4.0x).';
     const initialUserMsg: ChatGptMessage = {
       id: 'msg-init-user',
       role: 'user',
-      promptText: `[Pipeline: 3 File(s)] ${initialPromptText}`,
+      promptText: `[Unlimited Pipeline: 3 File(s)] ${initialPromptText}`,
       createdAt: '2026-11-04T09:00:00.000Z',
     };
     const initialPipelineRun = executeMultiDocPromptPipeline({
@@ -237,6 +240,13 @@ export default function DocumentAgentSuite() {
     }
     return undefined;
   }, [chatMessages]);
+
+  const livePipelineAnalysis = useMemo(() => {
+    return analyzeMultiDocumentPipeline(
+      uploadedDocsPipeline,
+      latestAssistantMsg?.promptText || 'Read, analyze, and synthesize all uploaded documents'
+    );
+  }, [uploadedDocsPipeline, latestAssistantMsg]);
 
   const averageAiScoreAfter = useMemo(() => {
     if (!currentDoc.sections.length) return 4;
@@ -298,7 +308,7 @@ export default function DocumentAgentSuite() {
   };
 
   /**
-   * Executes the Multi-Document Reading, Analysis & Synthesis Pipeline on an array of PipelineUploadedDocument items
+   * Executes the 5-Step Unlimited Multi-Document Reading, Analysis & Synthesis Pipeline on an array of PipelineUploadedDocument items
    * and updates both the Chat thread and the Live A4 Document Artifact immediately.
    */
   const runPipelineOnDocuments = (
@@ -307,12 +317,12 @@ export default function DocumentAgentSuite() {
   ) => {
     const effectiveInstruction =
       (customPromptInstruction || chatInputPrompt).trim() ||
-      `Read, analyze, and synthesize all ${docsToAnalyze.length} uploaded document(s) (${docsToAnalyze.map((d) => d.fileName).join(', ')}) into a unified, structured A4 Document Artifact with all facts locked.`;
+      `Execute all 5 pipeline steps: read, analyze, and synthesize all ${docsToAnalyze.length} queued document(s) (${docsToAnalyze.map((d) => d.fileName).join(', ')}) into a unified A4 Document Artifact with all facts locked.`;
 
     const userMsg: ChatGptMessage = {
       id: nextClientId('user-multidoc'),
       role: 'user',
-      promptText: `[Multi-Doc Pipeline: ${docsToAnalyze.length} File(s) Attached — ${docsToAnalyze
+      promptText: `[5-Step Unlimited Pipeline: ${docsToAnalyze.length} File(s) Active — ${docsToAnalyze
         .map((d) => d.fileName)
         .join(', ')}] ${effectiveInstruction}`,
       createdAt: new Date().toISOString(),
@@ -332,20 +342,21 @@ export default function DocumentAgentSuite() {
     setChatMessages((prev) => [...prev, userMsg, result.chatReply]);
     pushVersion(
       result.canonicalDocument,
-      `Multi-Doc Pipeline (${docsToAnalyze.length} Files): ${result.canonicalDocument.title.slice(0, 26)}`
+      `5-Step Pipeline (${docsToAnalyze.length} Files): ${result.canonicalDocument.title.slice(0, 26)}`
     );
     setImportedPdfMeta({
       fileName:
         docsToAnalyze.length === 1
           ? docsToAnalyze[0].fileName
-          : `${docsToAnalyze.length} Documents in Pipeline (${docsToAnalyze.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
+          : `${docsToAnalyze.length} Documents in Unlimited Pipeline (${docsToAnalyze.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
       pageCount: docsToAnalyze.reduce((s, d) => s + d.pageCount, 0),
       sectionCount: result.canonicalDocument.sections.length,
     });
     setChatActionMode('edit_current');
     setRightView('preview');
+    setActivePipelineStep(5);
     setStatusMessage(
-      `Multi-Document Pipeline Complete — Read & analyzed ${docsToAnalyze.length} file(s) (${docsToAnalyze.reduce(
+      `5-Step Unlimited Pipeline Complete — Ingested, read & analyzed ${docsToAnalyze.length} file(s) (${docsToAnalyze.reduce(
         (s, d) => s + d.pageCount,
         0
       )} pages, ${docsToAnalyze.reduce(
@@ -353,7 +364,7 @@ export default function DocumentAgentSuite() {
         0
       )} words) and synthesized ${result.canonicalDocument.sections.length} sections (${
         result.chatReply.aiScoreAfter
-      }% AI Score).`
+      }% AI Score). Keep adding more files or enter any prompt!`
     );
     scrollChatToBottom();
   };
@@ -364,8 +375,9 @@ export default function DocumentAgentSuite() {
   ) => {
     if (fileList.length === 0) return;
     setIsImportingPdf(true);
+    setActivePipelineStep(1);
     setStatusMessage(
-      `Ingesting & reading ${fileList.length} file(s) (${fileList.map((f) => f.name).join(', ')}) in Multi-Document Pipeline...`
+      `Step 1 & 2: Ingesting & reading ${fileList.length} file(s) (${fileList.map((f) => f.name).join(', ')}) into Unlimited Pipeline...`
     );
     try {
       const newlyIngested = await ingestMultipleFilesIntoPipeline(fileList);
@@ -400,67 +412,59 @@ export default function DocumentAgentSuite() {
     }
   };
 
-  const handleLoadMultiDocSamplePack = () => {
+  /**
+   * Continuously feeds 1 or more additional documents (#4, #5, #6, #7, #8... to ∞ Unlimited)
+   * into the active pipeline and immediately executes all 5 pipeline steps across the entire queue.
+   */
+  const handleFeedUnlimitedFilesToPipeline = (countToAdd = 1) => {
     setIsImportingPdf(true);
     try {
-      const sampleDocs = SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.map((d, idx) => ({
-        ...d,
-        id: `sample-pack-${Date.now()}-${idx + 1}`,
-      }));
-      setUploadedDocsPipeline(sampleDocs);
+      const currentCount = uploadedDocsPipeline.length;
+      const newDocs: PipelineUploadedDocument[] = [];
+      for (let i = 1; i <= countToAdd; i++) {
+        const nextNum = currentCount + i;
+        if (nextNum <= SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length) {
+          const baseSample = SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK[nextNum - 1];
+          newDocs.push({
+            ...baseSample,
+            id: `unlimited-sample-${Date.now()}-${nextNum}`,
+          });
+        } else {
+          newDocs.push(generateNextUnlimitedPipelineDocument(nextNum));
+        }
+      }
+      const updatedPipeline = [...uploadedDocsPipeline, ...newDocs];
+      setUploadedDocsPipeline(updatedPipeline);
       runPipelineOnDocuments(
-        sampleDocs,
-        'Read and cross-analyze all 3 uploaded documents (Client RFP, Financial ROI Model, and 99.99% SLA Spec) and build a unified Master Business Proposal.'
+        updatedPipeline,
+        `Added ${countToAdd} new file(s) (${newDocs.map((d) => d.fileName).join(', ')}) — Run all 5 pipeline steps across all ${updatedPipeline.length} documents in the unlimited queue.`
       );
     } finally {
       setIsImportingPdf(false);
     }
   };
 
-  const handleLoadSamplePdfToEdit = () => {
-    setIsImportingPdf(true);
-    try {
-      const userMsg: ChatGptMessage = {
-        id: nextClientId('user-import'),
-        role: 'user',
-        promptText: `Imported PDF "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${SAMPLE_IMPORTED_PDF_DATA.pageCount} pages) — Extract structure, run Claude 6-stage extended thinking on every section, and humanize under 10% AI score.`,
-        attachedInputContext: SAMPLE_IMPORTED_PDF_DATA.pageTexts.join('\n\n').slice(0, 800),
-        createdAt: new Date().toISOString(),
-      };
-
-      const { chatReply, canonicalDocument } = buildCanonicalDocumentFromImportedText({
-        fileName: SAMPLE_IMPORTED_PDF_DATA.fileName,
-        rawText: SAMPLE_IMPORTED_PDF_DATA.pageTexts.join('\n\n'),
-        pageTexts: SAMPLE_IMPORTED_PDF_DATA.pageTexts,
-        tone,
-        audience,
-        depthMode: thinkingDepthMode,
-      });
-
-      chatReply.directAnswerBullets = [
-        `Imported "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${canonicalDocument.sections.length} sections) and locked ${chatReply.lockedFacts?.length || 6} empirical entities.`,
-        `Reduced AI Detector Score from ${chatReply.aiScoreBefore}% down to ${chatReply.aiScoreAfter}% (<10% Pass).`,
-      ];
-
-      setUploadedDocsPipeline([]);
-      setChatMessages((prev) => [...prev, userMsg, chatReply]);
-      pushVersion(canonicalDocument, `Imported PDF: ${SAMPLE_IMPORTED_PDF_DATA.fileName.slice(0, 26)}`);
-      setImportedPdfMeta({
-        fileName: SAMPLE_IMPORTED_PDF_DATA.fileName,
-        pageCount: SAMPLE_IMPORTED_PDF_DATA.pageCount,
-        sectionCount: canonicalDocument.sections.length,
-      });
-      setChatActionMode('edit_current');
-      setRightView('preview');
-      setStatusMessage(
-        `Imported "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${canonicalDocument.sections.length} sections · ${
-          canonicalDocument.thinkingTrace?.microDecisionsCount || 28
-        } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
-      );
-      scrollChatToBottom();
-    } finally {
-      setIsImportingPdf(false);
+  const handleAddInlineCustomFileToPipeline = () => {
+    const cleanText = customFileContentInput.trim();
+    if (!cleanText) {
+      setStatusMessage('Please enter or paste text content to add as a new file into the pipeline.');
+      return;
     }
+    const nextNum = uploadedDocsPipeline.length + 1;
+    const newCustomDoc = generateNextUnlimitedPipelineDocument(
+      nextNum,
+      customFileNameInput.trim() || `${String(nextNum).padStart(2, '0')}_Custom_Pipeline_Doc_${nextNum}.txt`,
+      cleanText
+    );
+    const updatedPipeline = [...uploadedDocsPipeline, newCustomDoc];
+    setUploadedDocsPipeline(updatedPipeline);
+    setCustomFileNameInput('');
+    setCustomFileContentInput('');
+    setShowInlineFileCreator(false);
+    runPipelineOnDocuments(
+      updatedPipeline,
+      `Added custom document "${newCustomDoc.fileName}" as File #${nextNum} — Run all 5 pipeline steps across all ${updatedPipeline.length} files.`
+    );
   };
 
   const handleRemoveDocFromPipeline = (docId: string) => {
@@ -1147,7 +1151,7 @@ export default function DocumentAgentSuite() {
                 </div>
               </div>
 
-              {/* Multi-Document Ingestion Buttons */}
+              {/* Unlimited Continuous File Ingestion Buttons (No 3-File Cap — Feed 1 to ∞ Files) */}
               <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2">
                 <button
                   type="button"
@@ -1163,10 +1167,40 @@ export default function DocumentAgentSuite() {
                   <span>
                     {isImportingPdf
                       ? 'Reading Files...'
-                      : uploadedDocsPipeline.length > 0
-                      ? `+ Add More Files (${uploadedDocsPipeline.length} in Pipeline)`
-                      : 'Upload Multiple Files (.pdf, .docx, .txt)'}
+                      : `+ Upload & Add Files (${uploadedDocsPipeline.length} in ∞ Queue)`}
                   </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="feed-next-unlimited-doc-btn"
+                  disabled={isImportingPdf}
+                  onClick={() => handleFeedUnlimitedFilesToPipeline(1)}
+                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#1F2925] hover:bg-[#273630] text-xs font-semibold text-[#10A37F] border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <span>+ Feed Next File (#{uploadedDocsPipeline.length + 1} → ∞)</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="feed-batch-unlimited-docs-btn"
+                  disabled={isImportingPdf}
+                  onClick={() => handleFeedUnlimitedFilesToPipeline(3)}
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <span>+ Feed 3 More Files</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="toggle-custom-file-creator-btn"
+                  onClick={() => setShowInlineFileCreator((prev) => !prev)}
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Paperclip className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
+                  <span>{showInlineFileCreator ? 'Hide Custom File' : '+ Paste Custom File'}</span>
                 </button>
 
                 {uploadedDocsPipeline.length > 0 && (
@@ -1178,36 +1212,61 @@ export default function DocumentAgentSuite() {
                       uploadModeRef.current = 'replace';
                       pdfFileInputRef.current?.click();
                     }}
-                    className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#1F2925] hover:bg-[#273630] text-xs font-semibold text-[#10A37F] border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#B4B4B4] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                   >
-                    <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                    <span>Upload My Files (Replace)</span>
+                    <Upload className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
+                    <span>Upload &amp; Replace</span>
                   </button>
                 )}
-
-                <button
-                  type="button"
-                  data-testid="load-multi-doc-pipeline-btn"
-                  disabled={isImportingPdf}
-                  onClick={handleLoadMultiDocSamplePack}
-                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                  <span>Load 3 Sample Files</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={isImportingPdf}
-                  onClick={handleLoadSamplePdfToEdit}
-                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <FileText className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
-                  <span>1 Sample PDF</span>
-                </button>
               </div>
 
-              {/* Active Multi-Document Pipeline Queue & Per-File Analysis Cards (Supports Drag & Drop) */}
+              {/* Inline Custom File Creator (Add Unlimited Pasted/Typed Files to Pipeline) */}
+              {showInlineFileCreator && (
+                <div
+                  data-testid="inline-custom-file-creator"
+                  className="p-3 rounded-xl bg-[#161F1C] border border-[#10A37F]/50 space-y-2 text-xs"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[#10A37F]">
+                      Create &amp; Feed File #{uploadedDocsPipeline.length + 1} into Unlimited
+                      Pipeline
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowInlineFileCreator(false)}
+                      className="text-[#9B9B9B] hover:text-white cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={customFileNameInput}
+                    onChange={(e) => setCustomFileNameInput(e.target.value)}
+                    placeholder={`File name (e.g. ${String(uploadedDocsPipeline.length + 1).padStart(2, '0')}_Client_Notes_&_Budget.txt)`}
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#222E2A] border border-[#334740] text-xs text-white placeholder-[#8E8E8E] focus:outline-none focus:border-[#10A37F]"
+                  />
+                  <textarea
+                    rows={2}
+                    value={customFileContentInput}
+                    onChange={(e) => setCustomFileContentInput(e.target.value)}
+                    placeholder="Paste or type document text, numbers, requirements, or notes for this file..."
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#222E2A] border border-[#334740] text-xs text-white placeholder-[#8E8E8E] focus:outline-none focus:border-[#10A37F]"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      data-testid="submit-custom-pipeline-file-btn"
+                      onClick={handleAddInlineCustomFileToPipeline}
+                      className="px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white font-semibold text-xs cursor-pointer"
+                    >
+                      Add File #{uploadedDocsPipeline.length + 1} &amp; Run All 5 Pipeline Steps →
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Active 5-Step Unlimited Multi-Document Pipeline Queue & Per-File Analysis Cards */}
               {uploadedDocsPipeline.length > 0 ? (
                 <div
                   data-testid="multi-doc-pipeline-queue"
@@ -1227,8 +1286,8 @@ export default function DocumentAgentSuite() {
                     <div className="text-xs font-semibold text-[#10A37F] flex items-center gap-1.5">
                       <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                       <span>
-                        Multi-Doc Pipeline Active: {uploadedDocsPipeline.length} File(s) Read &amp;
-                        Analyzed
+                        5-Step Unlimited Pipeline Active: {uploadedDocsPipeline.length} File(s)
+                        Read &amp; Analyzed (∞ No Limit)
                       </span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -1242,7 +1301,7 @@ export default function DocumentAgentSuite() {
                         onClick={() => {
                           setUploadedDocsPipeline([]);
                           setImportedPdfMeta(null);
-                          setStatusMessage('Cleared all files from Multi-Document Pipeline.');
+                          setStatusMessage('Cleared all files from Unlimited Multi-Document Pipeline.');
                         }}
                         className="text-[11px] text-[#B4B4B4] hover:text-white px-2 py-0.5 rounded bg-[#1F2D28] border border-[#2E423B] cursor-pointer"
                       >
@@ -1251,43 +1310,73 @@ export default function DocumentAgentSuite() {
                     </div>
                   </div>
 
-                  {/* 4-Stage Visual Multi-Document Pipeline Status Bar */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
-                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
-                      <div className="font-semibold text-[#10A37F]">1. Ingested</div>
-                      <div className="font-mono text-[#B4B4B4]">
-                        {uploadedDocsPipeline.length} File(s) Loaded
-                      </div>
+                  {/* Interactive 5-Step Complete Unlimited Pipeline Progress Bar */}
+                  <div
+                    data-testid="complete-5-step-pipeline-bar"
+                    className="space-y-1.5"
+                  >
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-[10px]">
+                      {livePipelineAnalysis.pipelineSteps.map((pStep) => {
+                        const isSelected = activePipelineStep === pStep.stepNumber;
+                        return (
+                          <button
+                            key={pStep.stepNumber}
+                            type="button"
+                            data-testid={`pipeline-step-btn-${pStep.stepNumber}`}
+                            onClick={() => setActivePipelineStep(pStep.stepNumber)}
+                            className={`text-left px-2 py-1.5 rounded border transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#1F352D] border-[#10A37F] text-white'
+                                : 'bg-[#1A2622] border-[#2A3F38] text-[#E2E2E2] hover:border-[#10A37F]/50'
+                            }`}
+                          >
+                            <div className="font-semibold text-[#10A37F] flex items-center justify-between gap-1">
+                              <span>Step {pStep.stepNumber}</span>
+                              <span>✓</span>
+                            </div>
+                            <div className="font-medium text-white truncate">
+                              {pStep.stepTitle.replace(/^Step \d+:\s*/, '')}
+                            </div>
+                            <div className="font-mono text-[9px] text-[#B4B4B4] truncate">
+                              {pStep.metricBadge}
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
-                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
-                      <div className="font-semibold text-[#10A37F]">2. Read Text</div>
-                      <div className="font-mono text-[#B4B4B4]">
-                        {uploadedDocsPipeline.reduce((s, d) => s + d.pageCount, 0)}p ·{' '}
-                        {uploadedDocsPipeline.reduce((s, d) => s + d.wordCount, 0)}w
-                      </div>
-                    </div>
-                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
-                      <div className="font-semibold text-[#10A37F]">3. Analyzed</div>
-                      <div className="font-mono text-[#B4B4B4]">
-                        {uploadedDocsPipeline.reduce((s, d) => s + d.lockedFacts.length, 0)} Facts
-                        Locked
-                      </div>
-                    </div>
-                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
-                      <div className="font-semibold text-[#10A37F]">4. Prompt Ready</div>
-                      <div className="font-mono text-[#B4B4B4]">
-                        {currentDoc.sections.length} Sections Built
-                      </div>
-                    </div>
+
+                    {/* Selected Pipeline Step Live Execution Detail */}
+                    {(() => {
+                      const currentStepObj =
+                        livePipelineAnalysis.pipelineSteps.find(
+                          (s) => s.stepNumber === activePipelineStep
+                        ) || livePipelineAnalysis.pipelineSteps[0];
+                      if (!currentStepObj) return null;
+                      return (
+                        <div
+                          data-testid="active-pipeline-step-detail"
+                          className="px-2.5 py-1.5 rounded-lg bg-[#18231F] border border-[#283B34] text-[11px] text-[#D4D4D4] flex flex-col sm:flex-row sm:items-center justify-between gap-1.5"
+                        >
+                          <div className="min-w-0 break-words">
+                            <strong className="text-[#10A37F]">{currentStepObj.stepTitle}:</strong>{' '}
+                            {currentStepObj.detailSummary}
+                          </div>
+                          <span className="font-mono text-[10px] text-[#10A37F] shrink-0">
+                            {currentStepObj.metricBadge}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </div>
 
-                  {/* Per-Document Cards with Expandable "Read Text" Inspector */}
-                  <div className="space-y-1.5 max-h-[215px] overflow-y-auto pr-0.5">
+                  {/* Per-Document Cards with 5-Step Verified Badge & Expandable "Read Text" Inspector */}
+                  <div className="space-y-1.5 max-h-[225px] overflow-y-auto pr-0.5">
                     {uploadedDocsPipeline.map((doc, idx) => {
                       const isDocExpanded = Boolean(expandedPipelineDocIds[doc.id]);
                       return (
                         <div
                           key={doc.id}
+                          data-testid={`pipeline-doc-card-${idx + 1}`}
                           className="p-2 rounded-lg bg-[#1A2420] border border-[#2A3A34] space-y-1.5 text-xs"
                         >
                           <div className="flex items-start justify-between gap-2">
@@ -1302,6 +1391,9 @@ export default function DocumentAgentSuite() {
                                 <span className="text-[10px] font-mono text-[#9B9B9B]">
                                   ({doc.pageCount}p · {doc.wordCount}w · {doc.lockedFacts.length}{' '}
                                   facts)
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-[#141C19] text-[#10A37F] font-mono text-[9px] border border-[#2A3A34]">
+                                  Steps 1–5 ✓
                                 </span>
                               </div>
                               <p className="text-[11px] text-[#B4B4B4] line-clamp-2 break-words">
@@ -1358,7 +1450,7 @@ export default function DocumentAgentSuite() {
                   {/* 1-Click Multi-Doc Pipeline Prompts */}
                   <div className="pt-1 border-t border-[#263831] space-y-1.5">
                     <div className="text-[11px] font-semibold text-[#D4D4D4]">
-                      1-Click Execute Prompt Across All {uploadedDocsPipeline.length} Uploaded
+                      1-Click Execute Prompt Across All {uploadedDocsPipeline.length} Queued
                       Document(s):
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
@@ -1387,16 +1479,16 @@ export default function DocumentAgentSuite() {
                   className="p-3 rounded-xl bg-[#161D1A] border border-dashed border-[#10A37F]/40 text-xs text-[#B4B4B4] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                 >
                   <span>
-                    Drag &amp; drop multiple files (.pdf, .docx, .txt, .md, .csv) here or click{' '}
-                    <strong className="text-white">Upload Multiple Files</strong> to start the
-                    pipeline.
+                    Drag &amp; drop unlimited files (.pdf, .docx, .txt, .md, .csv) here or click{' '}
+                    <strong className="text-white">+ Feed Next File</strong> to start the 5-step
+                    unlimited pipeline.
                   </span>
                   <button
                     type="button"
-                    onClick={handleLoadMultiDocSamplePack}
+                    onClick={() => handleFeedUnlimitedFilesToPipeline(3)}
                     className="px-2.5 py-1 rounded bg-[#1F2D28] text-[#10A37F] font-semibold shrink-0 cursor-pointer"
                   >
-                    Load 3 Sample Files
+                    + Feed First 3 Files
                   </button>
                 </div>
               )}

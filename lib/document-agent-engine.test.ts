@@ -18,6 +18,7 @@ import {
   SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
   buildCanonicalDocumentFromImportedText,
   editDocumentWithChatGptPrompt,
+  generateNextUnlimitedPipelineDocument,
   analyzeMultiDocumentPipeline,
   executeMultiDocPromptPipeline,
 } from './document-agent-engine';
@@ -395,6 +396,50 @@ test('Multi-Document Ingestion, Reading & Analysis Pipeline: reads 3 uploaded do
     result.canonicalDocument.sections.length + 1
   );
   assert.ok(addSectionResult.multiDocAnalysis);
+  assert.equal(addSectionResult.multiDocAnalysis!.pipelineSteps.length, 5);
+});
+
+test('5-Step Unlimited Continuous Pipeline: continuously feeds 8+ documents (stream + custom inline files) with zero file cap and executes all 5 pipeline steps', () => {
+  const unlimitedQueue = [...SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK];
+
+  // Continuously feed files #4, #5, #6, #7, and #8 (custom inline file)
+  for (let nextNum = 4; nextNum <= 7; nextNum++) {
+    unlimitedQueue.push(generateNextUnlimitedPipelineDocument(nextNum));
+  }
+  unlimitedQueue.push(
+    generateNextUnlimitedPipelineDocument(
+      8,
+      '08_Board_Expansion_&_Q1_Budget_Mandate.txt',
+      'Board Expansion Mandate: Approved $195,000 Q1 expansion budget across 6 new metropolitan markets with a 99.95% fulfillment SLA.'
+    )
+  );
+
+  assert.equal(unlimitedQueue.length, 8);
+
+  const pipelineRun = executeMultiDocPromptPipeline({
+    prompt: 'Execute all 5 pipeline steps across all 8 queued documents and synthesize a Master Business Proposal',
+    uploadedDocs: unlimitedQueue,
+    mode: 'generate_new',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+
+  assert.ok(pipelineRun.multiDocAnalysis);
+  assert.equal(pipelineRun.multiDocAnalysis!.totalFiles, 8);
+  assert.equal(pipelineRun.multiDocAnalysis!.pipelineSteps.length, 5);
+  assert.ok(
+    pipelineRun.multiDocAnalysis!.pipelineSteps[0].metricBadge.includes('8 File(s) Queued')
+  );
+  assert.ok(
+    pipelineRun.multiDocAnalysis!.combinedLockedFacts.some((f) => f.includes('$195,000'))
+  );
+
+  // Verify all 8 documents are synthesized into sections + 8 rows in the Cross-Document Comparison Matrix
+  assert.equal(pipelineRun.canonicalDocument.sections.length, 10); // 1 Exec Synthesis + 8 Per-Doc Sections + 1 Final Matrix Section
+  const finalMatrixSec =
+    pipelineRun.canonicalDocument.sections[pipelineRun.canonicalDocument.sections.length - 1];
+  assert.ok(finalMatrixSec.table);
+  assert.equal(finalMatrixSec.table!.rows.length, 8);
 });
 
 

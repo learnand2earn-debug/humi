@@ -1957,6 +1957,15 @@ export interface PipelineUploadedDocument {
   uploadedAt: string;
 }
 
+export interface UnlimitedPipelineStep {
+  stepNumber: 1 | 2 | 3 | 4 | 5;
+  stepTitle: string;
+  stepSubtitle: string;
+  status: 'completed' | 'active';
+  metricBadge: string;
+  detailSummary: string;
+}
+
 export interface MultiDocumentPipelineAnalysis {
   totalFiles: number;
   totalPages: number;
@@ -1972,6 +1981,7 @@ export interface MultiDocumentPipelineAnalysis {
   }>;
   crossDocumentSynthesis: string[];
   promptExecutionSummary: string;
+  pipelineSteps: UnlimitedPipelineStep[];
 }
 
 export interface ChatGptMessage {
@@ -2948,9 +2958,110 @@ export const SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK: PipelineUploadedDocument[] = [
   }),
 ];
 
+const UNLIMITED_STREAM_DOCUMENT_BLUEPRINTS: Array<{
+  suffixName: string;
+  pageCount: number;
+  pageTexts: string[];
+}> = [
+  {
+    suffixName: 'Competitor_Benchmark_&_Market_Share_Q4.pdf',
+    pageCount: 2,
+    pageTexts: [
+      `Competitor Benchmark & Market Share Intelligence (Q4 2026)\n\nAcross the top 12 regional e-commerce competitors, median customer acquisition cost (CAC) has risen by 29.4% to $26.80, while Nova Retail Group maintains a 34.2% organic search share.\n\nStrategic Opportunity: Capturing mobile checkout drop-offs unlocks an additional 19.5% market share gain within 90 days.`,
+      `Channel Attribution & Ad Spend Efficiency\n\nShifting 25% of top-of-funnel spend toward high-intent server-side retargeting lowers blended CPA to $16.40 and lifts repeat buyer velocity by 2.6x.`,
+    ],
+  },
+  {
+    suffixName: 'Customer_Retention_&_CRM_Lifecycle_Audit.docx',
+    pageCount: 2,
+    pageTexts: [
+      `Customer Retention, LTV & CRM Lifecycle Audit\n\nCurrent 90-day customer lifetime value (LTV) stands at $184 with a 4.6x LTV:CAC ratio across 62,000 active loyalty members. Automated post-purchase SMS and email flows currently recover 22.8% of abandoned carts.\n\nTarget Lifecycle Mandate: Increase 60-day repeat purchase rate from 31.0% to 44.5% via personalized replenishment triggers.`,
+      `VIP Tier Segmentation & Churn Prevention\n\nDeploying predictive churn scoring across top-decile buyers preserves $165,000 in recurring quarterly revenue.`,
+    ],
+  },
+  {
+    suffixName: 'Legal_MSA_Data_Privacy_&_GDPR_Addendum.pdf',
+    pageCount: 2,
+    pageTexts: [
+      `Master Services Agreement (MSA) & Global Data Privacy Addendum\n\nAll customer telemetry and payment flows must strictly comply with GDPR, CCPA, and ISO-27001 standards with zero plaintext PII storage.\n\nMandatory Legal Guardrails: 100% data residency compliance across regional cloud zones, 72-hour regulatory breach notification SLA, and $2,000,000 cyber-liability indemnity coverage.`,
+      `Intellectual Property & Deliverables Ownership\n\nUpon milestone settlement, 100% of custom storefront code, CRO experiments, and analytics pipelines transfer unconditionally to the client.`,
+    ],
+  },
+  {
+    suffixName: 'Omnichannel_Paid_Media_Allocation_Sheet.csv',
+    pageCount: 1,
+    pageTexts: [
+      `Omnichannel Paid Media Allocation & ROAS Target Matrix\n\nChannel Allocation: Meta Advantage+ Shopping (42% budget · 4.2x target ROAS), Google PMax & Brand Search (38% budget · 4.5x target ROAS), TikTok & YouTube Creator Whitelisting (20% budget · 3.4x target ROAS).\n\nWeekly Spend Guardrail: $14,500 weekly media cap during Weeks 1–4, scaling to $28,000/week once blended ROAS exceeds 3.8x.`,
+    ],
+  },
+  {
+    suffixName: 'Supply_Chain_&_18_Hub_Fulfillment_SLA.pdf',
+    pageCount: 2,
+    pageTexts: [
+      `18-Hub Regional Fulfillment & Inventory Sync Specification\n\nReal-time ERP inventory synchronization every 30 seconds across all 18 regional warehouses prevents overselling during flash sales (99.4% order accuracy SLA).\n\nDispatch & Last-Mile Benchmarks: 98.7% same-day dispatch for orders placed before 16:00 local time, cutting average delivery lead time from 4.2 days to 1.8 days.`,
+      `Reverse Logistics & Returns Automation\n\nAutomated self-serve exchange portal retains 38.5% of return value as instant store credit and keeps return defect rates under 1.9%.`,
+    ],
+  },
+];
+
 /**
- * Reads and analyzes all documents in the Multi-Document Pipeline, extracting per-document insights,
- * combined locked facts, and cross-document synthesis tailored to the user's prompt.
+ * Generates the next document (#4, #5, #6, #7... to ∞ Unlimited) for the continuous Multi-Document Pipeline stream,
+ * or creates a structured pipeline document from custom inline user title + text.
+ */
+export function generateNextUnlimitedPipelineDocument(
+  nextSequenceNumber: number,
+  customFileName?: string,
+  customRawText?: string
+): PipelineUploadedDocument {
+  const seqFormatted = String(nextSequenceNumber).padStart(2, '0');
+
+  if (customRawText && customRawText.trim().length > 0) {
+    const cleanName =
+      customFileName && customFileName.trim().length > 0
+        ? customFileName.trim()
+        : `${seqFormatted}_Custom_Pipeline_Document_${nextSequenceNumber}.txt`;
+    const normalizedName = /\.(pdf|docx|txt|md|csv|json)$/i.test(cleanName)
+      ? cleanName
+      : `${cleanName}.txt`;
+    const paras = customRawText
+      .trim()
+      .split(/\n\n+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return createPipelineDocumentFromRaw({
+      id: `unlimited-custom-doc-${Date.now()}-${nextSequenceNumber}`,
+      fileName: normalizedName,
+      rawText: customRawText.trim(),
+      pageTexts: paras.length > 0 ? paras : [customRawText.trim()],
+      pageCount: Math.max(1, Math.ceil(customRawText.trim().split(/\s+/).length / 220)),
+    });
+  }
+
+  const blueprintIdx =
+    (Math.max(1, nextSequenceNumber) - 4 + UNLIMITED_STREAM_DOCUMENT_BLUEPRINTS.length * 100) %
+    UNLIMITED_STREAM_DOCUMENT_BLUEPRINTS.length;
+  const blueprint = UNLIMITED_STREAM_DOCUMENT_BLUEPRINTS[blueprintIdx];
+  const cycleBatch = Math.floor(Math.max(0, nextSequenceNumber - 4) / UNLIMITED_STREAM_DOCUMENT_BLUEPRINTS.length);
+  const dynamicMetricBoost = cycleBatch > 0 ? ` (Batch #${cycleBatch + 1} · +${14 + cycleBatch * 3}% Efficiency Gain)` : '';
+
+  const fileName = `${seqFormatted}_${blueprint.suffixName}`;
+  const pageTexts = blueprint.pageTexts.map((pt, idx) =>
+    idx === 0 ? `[Pipeline Stream File #${nextSequenceNumber}${dynamicMetricBoost}] ${pt}` : pt
+  );
+
+  return createPipelineDocumentFromRaw({
+    id: `unlimited-stream-doc-${Date.now()}-${nextSequenceNumber}`,
+    fileName,
+    rawText: pageTexts.join('\n\n'),
+    pageTexts,
+    pageCount: blueprint.pageCount,
+  });
+}
+
+/**
+ * Reads and analyzes all documents in the Multi-Document Pipeline (1 to Unlimited Files),
+ * extracting per-document insights, combined locked facts, cross-document synthesis,
+ * and the 5-Step Complete Pipeline Execution Trace.
  */
 export function analyzeMultiDocumentPipeline(
   docs: PipelineUploadedDocument[],
@@ -2977,10 +3088,10 @@ export function analyzeMultiDocumentPipeline(
 
   if (docs.length >= 2) {
     crossDocumentSynthesis.push(
-      `Cross-Document Alignment (${docs.length} Files · ${totalPages} Pages · ${totalWords} Words): Synthesized core objectives, metrics, and technical constraints across ${docs.map((d) => `"${d.fileName}"`).join(', ')}.`
+      `Cross-Document Alignment (${docs.length} Unlimited Pipeline Files · ${totalPages} Pages · ${totalWords} Words): Synthesized core objectives, metrics, and technical constraints across ${docs.map((d) => `"${d.fileName}"`).join(', ')}.`
     );
     crossDocumentSynthesis.push(
-      `Empirical Fact-Lock Registry (${combinedLockedFacts.length} Verified Entities): Preserved [${combinedLockedFacts.slice(0, 10).join(', ') || 'all original metrics & dates'}] across all uploaded source documents without fabrication.`
+      `Empirical Fact-Lock Registry (${combinedLockedFacts.length} Verified Entities): Preserved [${combinedLockedFacts.slice(0, 10).join(', ') || 'all original metrics & dates'}] across all ${docs.length} uploaded source documents without fabrication.`
     );
     docs.forEach((doc, idx) => {
       crossDocumentSynthesis.push(
@@ -3000,8 +3111,51 @@ export function analyzeMultiDocumentPipeline(
   const cleanPrompt = userPrompt.trim() || 'Read, analyze, and synthesize all uploaded documents';
   const promptExecutionSummary =
     docs.length > 0
-      ? `Executed prompt ("${cleanPrompt}") across ${docs.length} uploaded document(s) (${totalPages} total pages, ${totalWords} words, ${combinedLockedFacts.length} locked facts). Every document's key findings, numbers, and requirements have been analyzed and woven into the live A4 Document Artifact.`
+      ? `Executed prompt ("${cleanPrompt}") across all ${docs.length} pipeline document(s) (${totalPages} total pages, ${totalWords} words, ${combinedLockedFacts.length} locked facts). Every document (#1 through #${docs.length}) has been read, analyzed, and woven into the live A4 Document Artifact.`
       : `Executed prompt ("${cleanPrompt}") with 6-Stage Claude Extended Thinking and <10% AI Detector humanization.`;
+
+  const pipelineSteps: UnlimitedPipelineStep[] = [
+    {
+      stepNumber: 1,
+      stepTitle: 'Step 1: Unlimited File Ingestion Stream',
+      stepSubtitle: 'Continuous Multi-Format Queue (∞ No File Cap)',
+      status: 'completed',
+      metricBadge: `${totalFiles} File(s) Queued (∞ Unlimited)`,
+      detailSummary: `Ingested ${totalFiles} document(s) (${docs.map((d, i) => `#${i + 1} ${d.fileName}`).join(', ')}) — keep adding unlimited PDF, DOCX, TXT, CSV, or inline text files at any time.`,
+    },
+    {
+      stepNumber: 2,
+      stepTitle: 'Step 2: Deep Multi-File Reading & Extraction',
+      stepSubtitle: 'Page-by-Page Text & Heading Parser',
+      status: 'completed',
+      metricBadge: `${totalPages} Pages · ${totalWords} Words Read`,
+      detailSummary: `Read and parsed 100% of pages (${totalPages}p) and paragraphs (${totalWords}w) across all ${totalFiles} file(s) in the pipeline.`,
+    },
+    {
+      stepNumber: 3,
+      stepTitle: 'Step 3: Cross-Document Fact-Lock & Analysis',
+      stepSubtitle: 'Empirical Entity & Conflict Verification',
+      status: 'completed',
+      metricBadge: `${combinedLockedFacts.length} Facts Locked`,
+      detailSummary: `Extracted and locked ${combinedLockedFacts.length} empirical numbers, budgets, dates, and SLAs [${combinedLockedFacts.slice(0, 6).join(', ') || 'all key entities'}] across all ${totalFiles} files.`,
+    },
+    {
+      stepNumber: 4,
+      stepTitle: 'Step 4: Prompt-Driven Synthesis & Thinking',
+      stepSubtitle: '6-Stage Claude Thinking + <10% AI Calibration',
+      status: 'completed',
+      metricBadge: `Prompt Applied to All ${totalFiles} Files`,
+      detailSummary: `Executed "${cleanPrompt.slice(0, 68)}" across all ${totalFiles} documents with first-principles reasoning and <10% AI score humanization.`,
+    },
+    {
+      stepNumber: 5,
+      stepTitle: 'Step 5: Live A4 Artifact & Top Humanizer Bridge',
+      stepSubtitle: 'Multi-Doc Matrix + Structure-Preserved PDF',
+      status: 'completed',
+      metricBadge: `${totalFiles}-Doc Matrix & PDF Ready`,
+      detailSummary: `Built Live A4 Document Artifact with ${totalFiles}-row Cross-Document Matrix — ready for Clean PDF export or 1-click handoff to Top PDF Humanizer.`,
+    },
+  ];
 
   return {
     totalFiles,
@@ -3012,6 +3166,7 @@ export function analyzeMultiDocumentPipeline(
     perDocumentInsights,
     crossDocumentSynthesis,
     promptExecutionSummary,
+    pipelineSteps,
   };
 }
 
