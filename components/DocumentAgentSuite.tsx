@@ -23,6 +23,7 @@ import {
   DOCUMENT_TYPE_CATALOG,
   PROFESSIONAL_TEMPLATES,
   SAMPLE_IMPORTED_PDF_DATA,
+  SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
   AgentRewriteTone,
   AudienceLevel,
   CanonicalDocumentModel,
@@ -32,11 +33,12 @@ import {
   ArtifactPdfFontStyle,
   ArtifactPdfShapePreset,
   ClaudeThinkingDepthMode,
+  PipelineUploadedDocument,
   generateChatGptStyleResponse,
   applyPromptToDocumentOrSection,
-  editDocumentWithChatGptPrompt,
   buildCanonicalDocumentFromImportedText,
-  extractTextFromUploadedPdfOrTextFile,
+  ingestMultipleFilesIntoPipeline,
+  executeMultiDocPromptPipeline,
   runControlledHumanizePipeline,
   applyEditorQuickAction,
   exportCanonicalDocumentToPdfBytes,
@@ -100,6 +102,13 @@ const STARTER_PROMPTS = [
   },
 ];
 
+const MULTI_DOC_PIPELINE_PROMPTS = [
+  'Combine & synthesize all uploaded documents into 1 Master Business Proposal with all numbers locked',
+  'Compare all uploaded files and build a Cross-Document Risk & SLA Audit report',
+  'Extract every budget figure, ROI metric, and timeline from all uploaded files into a ledger',
+  'Condense all uploaded documents into a 1-Page Executive Summary in C-Suite tone',
+];
+
 let clientSeqCounter = 200;
 function nextClientId(prefix: string): string {
   clientSeqCounter += 1;
@@ -113,9 +122,12 @@ export default function DocumentAgentSuite() {
   const [thinkingDepthMode, setThinkingDepthMode] =
     useState<ClaudeThinkingDepthMode>('extended_deep');
   const [showMicroThinkingOnA4, setShowMicroThinkingOnA4] = useState<boolean>(true);
-  const [expandedThinkingMsgIds, setExpandedThinkingMsgIds] = useState<Record<string, boolean>>({
-    'msg-init-assistant': true,
-  });
+  // Keep thinking accordion collapsed by default so chat replies and prompt outputs are always immediately visible
+  const [expandedThinkingMsgIds, setExpandedThinkingMsgIds] = useState<Record<string, boolean>>({});
+  const [expandedPipelineDocIds, setExpandedPipelineDocIds] = useState<Record<string, boolean>>({});
+  const [isDraggingOverPipeline, setIsDraggingOverPipeline] = useState<boolean>(false);
+  const uploadModeRef = useRef<'append' | 'replace'>('append');
+
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateStyleConfig>(
     () => PROFESSIONAL_TEMPLATES[0]
   );
@@ -130,16 +142,25 @@ export default function DocumentAgentSuite() {
   const [mobilePane, setMobilePane] = useState<'both' | 'chat' | 'document'>('both');
   const rightColumnRef = useRef<HTMLDivElement | null>(null);
   const leftColumnRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
   // Default to 'edit_current' so typing prompts works like Claude Artifacts / ChatGPT Canvas (iteratively updating the document)
   const [chatActionMode, setChatActionMode] = useState<'edit_current' | 'generate_new'>(
     'edit_current'
   );
+  // Multi-Document Ingestion, Reading & Analysis Pipeline state (pre-loaded with 3 realistic documents ready for immediate multi-doc prompting)
+  const [uploadedDocsPipeline, setUploadedDocsPipeline] = useState<PipelineUploadedDocument[]>(
+    () => SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK
+  );
   const [importedPdfMeta, setImportedPdfMeta] = useState<{
     fileName: string;
     pageCount: number;
     sectionCount: number;
-  } | null>(null);
+  } | null>(() => ({
+    fileName: `${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length} Documents in Pipeline (${SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
+    pageCount: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.reduce((s, d) => s + d.pageCount, 0),
+    sectionCount: 5,
+  }));
   const [isImportingPdf, setIsImportingPdf] = useState<boolean>(false);
 
   const [chatInputPrompt, setChatInputPrompt] = useState<string>('');
@@ -152,24 +173,28 @@ export default function DocumentAgentSuite() {
   const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
   const [sectionPromptMap, setSectionPromptMap] = useState<Record<string, string>>({});
   const [statusMessage, setStatusMessage] = useState<string>(
-    'Claude Extended Thinking Active (6 Stages · 46 Micro-Decisions Verified) — Every section is reasoned from first principles. Prompt to refine any detail or click "Send Final PDF to Top Humanizer ↑".'
+    'Multi-Document Pipeline Active (3 Files Read & Analyzed · 6 Pages · 18 Locked Facts) — Upload your own files or enter any prompt below to analyze, compare, summarize, or build your document.'
   );
 
   const [chatMessages, setChatMessages] = useState<ChatGptMessage[]>(() => {
+    const initialPromptText =
+      'Mujhe digital marketing agency (Apex Growth Digital) ke liye client Nova Retail Group ka complete Business Proposal chahiye — teeno uploaded documents (Client RFP, Financial ROI Forecast, aur 99.99% SLA Spec) ko read aur analyze kar ke ($8,500/month retainer, 12 weeks timeline, scale ROAS from 2.1x to 4.0x).';
     const initialUserMsg: ChatGptMessage = {
       id: 'msg-init-user',
       role: 'user',
-      promptText:
-        'Mujhe digital marketing agency (Apex Growth Digital) ke liye client Nova Retail Group ka complete Business Proposal chahiye ($8,500/month retainer, 12 weeks timeline, scale ROAS from 2.1x to 4.0x).',
+      promptText: `[Pipeline: 3 File(s)] ${initialPromptText}`,
       createdAt: '2026-11-04T09:00:00.000Z',
     };
-    const initialAssistantMsg = generateChatGptStyleResponse({
-      prompt: initialUserMsg.promptText,
+    const initialPipelineRun = executeMultiDocPromptPipeline({
+      prompt: initialPromptText,
+      uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+      mode: 'generate_new',
       tone: 'Persuasive',
       audience: 'Client / Small Business Owner',
       lengthTarget: 'Medium (2–3 Pages)',
       depthMode: 'extended_deep',
     });
+    const initialAssistantMsg = initialPipelineRun.chatReply;
     initialAssistantMsg.id = 'msg-init-assistant';
     initialAssistantMsg.createdAt = '2026-11-04T09:00:05.000Z';
     if (initialAssistantMsg.canonicalDocument) {
@@ -190,11 +215,21 @@ export default function DocumentAgentSuite() {
       id: 'ver-1',
       documentId: currentDoc.id,
       versionNumber: 1,
-      label: 'Initial Extended-Thinking Draft (v1)',
+      label: 'Initial Multi-Doc Pipeline Draft (v1)',
       createdAt: currentDoc.createdAt,
       documentSnapshot: currentDoc,
     },
   ]);
+
+  const scrollChatToBottom = () => {
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        if (chatScrollContainerRef.current) {
+          chatScrollContainerRef.current.scrollTop = chatScrollContainerRef.current.scrollHeight;
+        }
+      });
+    }
+  };
 
   const latestAssistantMsg = useMemo(() => {
     for (let i = chatMessages.length - 1; i >= 0; i--) {
@@ -234,6 +269,13 @@ export default function DocumentAgentSuite() {
     }));
   };
 
+  const togglePipelineDocReader = (docId: string) => {
+    setExpandedPipelineDocIds((prev) => ({
+      ...prev,
+      [docId]: !prev[docId],
+    }));
+  };
+
   const pushVersion = (updatedDoc: CanonicalDocumentModel, label: string) => {
     const nextVerNum = versionHistory.length + 1;
     const stamped: CanonicalDocumentModel = {
@@ -255,85 +297,183 @@ export default function DocumentAgentSuite() {
     ]);
   };
 
-  const handleImportPdfFromData = (params: {
-    fileName: string;
-    rawText: string;
-    pageTexts: string[];
-    pageCount: number;
-    customInstruction?: string;
-  }) => {
-    const { fileName, rawText, pageTexts, pageCount, customInstruction } = params;
+  /**
+   * Executes the Multi-Document Reading, Analysis & Synthesis Pipeline on an array of PipelineUploadedDocument items
+   * and updates both the Chat thread and the Live A4 Document Artifact immediately.
+   */
+  const runPipelineOnDocuments = (
+    docsToAnalyze: PipelineUploadedDocument[],
+    customPromptInstruction?: string
+  ) => {
+    const effectiveInstruction =
+      (customPromptInstruction || chatInputPrompt).trim() ||
+      `Read, analyze, and synthesize all ${docsToAnalyze.length} uploaded document(s) (${docsToAnalyze.map((d) => d.fileName).join(', ')}) into a unified, structured A4 Document Artifact with all facts locked.`;
+
     const userMsg: ChatGptMessage = {
-      id: nextClientId('user-import'),
+      id: nextClientId('user-multidoc'),
       role: 'user',
-      promptText:
-        customInstruction ||
-        `Imported PDF "${fileName}" (${pageCount} pages) — Extract structure, run Claude 6-stage extended thinking on every section, and humanize under 10% AI score.`,
-      attachedInputContext: rawText.slice(0, 800),
+      promptText: `[Multi-Doc Pipeline: ${docsToAnalyze.length} File(s) Attached — ${docsToAnalyze
+        .map((d) => d.fileName)
+        .join(', ')}] ${effectiveInstruction}`,
       createdAt: new Date().toISOString(),
     };
 
-    const { chatReply, canonicalDocument } = buildCanonicalDocumentFromImportedText({
-      fileName,
-      rawText,
-      pageTexts,
-      userPromptInstruction: customInstruction,
+    const result = executeMultiDocPromptPipeline({
+      prompt: effectiveInstruction,
+      uploadedDocs: docsToAnalyze,
+      currentDoc,
+      inputContext: chatAttachedContext,
+      mode: 'generate_new',
       tone,
       audience,
       depthMode: thinkingDepthMode,
     });
 
-    setChatMessages((prev) => [...prev, userMsg, chatReply]);
-    setExpandedThinkingMsgIds((prev) => ({ ...prev, [chatReply.id]: true }));
-    pushVersion(canonicalDocument, `Imported PDF: ${fileName.slice(0, 26)}`);
+    setChatMessages((prev) => [...prev, userMsg, result.chatReply]);
+    pushVersion(
+      result.canonicalDocument,
+      `Multi-Doc Pipeline (${docsToAnalyze.length} Files): ${result.canonicalDocument.title.slice(0, 26)}`
+    );
     setImportedPdfMeta({
-      fileName,
-      pageCount,
-      sectionCount: canonicalDocument.sections.length,
+      fileName:
+        docsToAnalyze.length === 1
+          ? docsToAnalyze[0].fileName
+          : `${docsToAnalyze.length} Documents in Pipeline (${docsToAnalyze.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
+      pageCount: docsToAnalyze.reduce((s, d) => s + d.pageCount, 0),
+      sectionCount: result.canonicalDocument.sections.length,
     });
     setChatActionMode('edit_current');
     setRightView('preview');
     setStatusMessage(
-      `Imported "${fileName}" (${canonicalDocument.sections.length} sections · ${
-        canonicalDocument.thinkingTrace?.microDecisionsCount || 28
-      } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
+      `Multi-Document Pipeline Complete — Read & analyzed ${docsToAnalyze.length} file(s) (${docsToAnalyze.reduce(
+        (s, d) => s + d.pageCount,
+        0
+      )} pages, ${docsToAnalyze.reduce(
+        (s, d) => s + d.wordCount,
+        0
+      )} words) and synthesized ${result.canonicalDocument.sections.length} sections (${
+        result.chatReply.aiScoreAfter
+      }% AI Score).`
     );
+    scrollChatToBottom();
   };
 
-  const handleUploadPdfFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const ingestFilesIntoPipelineState = async (
+    fileList: File[],
+    strategy: 'append' | 'replace'
+  ) => {
+    if (fileList.length === 0) return;
     setIsImportingPdf(true);
-    setStatusMessage(`Importing "${file.name}" and running Claude section-by-section thinking...`);
+    setStatusMessage(
+      `Ingesting & reading ${fileList.length} file(s) (${fileList.map((f) => f.name).join(', ')}) in Multi-Document Pipeline...`
+    );
     try {
-      const extracted = await extractTextFromUploadedPdfOrTextFile(file);
-      handleImportPdfFromData({
-        fileName: extracted.fileName,
-        rawText: extracted.rawText,
-        pageTexts: extracted.pageTexts,
-        pageCount: extracted.pageCount,
-        customInstruction: chatInputPrompt.trim() || undefined,
-      });
+      const newlyIngested = await ingestMultipleFilesIntoPipeline(fileList);
+      const combinedPipeline =
+        strategy === 'replace'
+          ? newlyIngested
+          : [...uploadedDocsPipeline, ...newlyIngested];
+      setUploadedDocsPipeline(combinedPipeline);
+      runPipelineOnDocuments(combinedPipeline, chatInputPrompt.trim() || undefined);
       if (chatInputPrompt.trim()) {
         setChatInputPrompt('');
       }
     } finally {
       setIsImportingPdf(false);
-      e.target.value = '';
+    }
+  };
+
+  const handleUploadPdfFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? Array.from(e.target.files) : [];
+    const strategy = uploadModeRef.current;
+    uploadModeRef.current = 'append';
+    await ingestFilesIntoPipelineState(fileList, strategy);
+    e.target.value = '';
+  };
+
+  const handlePipelineDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingOverPipeline(false);
+    const fileList = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+    if (fileList.length > 0) {
+      await ingestFilesIntoPipelineState(fileList, 'append');
+    }
+  };
+
+  const handleLoadMultiDocSamplePack = () => {
+    setIsImportingPdf(true);
+    try {
+      const sampleDocs = SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.map((d, idx) => ({
+        ...d,
+        id: `sample-pack-${Date.now()}-${idx + 1}`,
+      }));
+      setUploadedDocsPipeline(sampleDocs);
+      runPipelineOnDocuments(
+        sampleDocs,
+        'Read and cross-analyze all 3 uploaded documents (Client RFP, Financial ROI Model, and 99.99% SLA Spec) and build a unified Master Business Proposal.'
+      );
+    } finally {
+      setIsImportingPdf(false);
     }
   };
 
   const handleLoadSamplePdfToEdit = () => {
     setIsImportingPdf(true);
     try {
-      handleImportPdfFromData({
+      const userMsg: ChatGptMessage = {
+        id: nextClientId('user-import'),
+        role: 'user',
+        promptText: `Imported PDF "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${SAMPLE_IMPORTED_PDF_DATA.pageCount} pages) — Extract structure, run Claude 6-stage extended thinking on every section, and humanize under 10% AI score.`,
+        attachedInputContext: SAMPLE_IMPORTED_PDF_DATA.pageTexts.join('\n\n').slice(0, 800),
+        createdAt: new Date().toISOString(),
+      };
+
+      const { chatReply, canonicalDocument } = buildCanonicalDocumentFromImportedText({
         fileName: SAMPLE_IMPORTED_PDF_DATA.fileName,
         rawText: SAMPLE_IMPORTED_PDF_DATA.pageTexts.join('\n\n'),
         pageTexts: SAMPLE_IMPORTED_PDF_DATA.pageTexts,
-        pageCount: SAMPLE_IMPORTED_PDF_DATA.pageCount,
+        tone,
+        audience,
+        depthMode: thinkingDepthMode,
       });
+
+      chatReply.directAnswerBullets = [
+        `Imported "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${canonicalDocument.sections.length} sections) and locked ${chatReply.lockedFacts?.length || 6} empirical entities.`,
+        `Reduced AI Detector Score from ${chatReply.aiScoreBefore}% down to ${chatReply.aiScoreAfter}% (<10% Pass).`,
+      ];
+
+      setUploadedDocsPipeline([]);
+      setChatMessages((prev) => [...prev, userMsg, chatReply]);
+      pushVersion(canonicalDocument, `Imported PDF: ${SAMPLE_IMPORTED_PDF_DATA.fileName.slice(0, 26)}`);
+      setImportedPdfMeta({
+        fileName: SAMPLE_IMPORTED_PDF_DATA.fileName,
+        pageCount: SAMPLE_IMPORTED_PDF_DATA.pageCount,
+        sectionCount: canonicalDocument.sections.length,
+      });
+      setChatActionMode('edit_current');
+      setRightView('preview');
+      setStatusMessage(
+        `Imported "${SAMPLE_IMPORTED_PDF_DATA.fileName}" (${canonicalDocument.sections.length} sections · ${
+          canonicalDocument.thinkingTrace?.microDecisionsCount || 28
+        } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
+      );
+      scrollChatToBottom();
     } finally {
       setIsImportingPdf(false);
+    }
+  };
+
+  const handleRemoveDocFromPipeline = (docId: string) => {
+    const remaining = uploadedDocsPipeline.filter((d) => d.id !== docId);
+    setUploadedDocsPipeline(remaining);
+    if (remaining.length > 0) {
+      runPipelineOnDocuments(
+        remaining,
+        `Re-synthesize the remaining ${remaining.length} document(s) in the pipeline.`
+      );
+    } else {
+      setImportedPdfMeta(null);
+      setStatusMessage('Cleared file from Multi-Document Pipeline.');
     }
   };
 
@@ -347,13 +487,21 @@ export default function DocumentAgentSuite() {
       overrideContext !== undefined ? overrideContext : chatAttachedContext
     ).trim();
 
-    if (!promptToUse && !contextToUse) return;
+    if (!promptToUse && !contextToUse && uploadedDocsPipeline.length === 0) {
+      setStatusMessage(
+        'Please enter a prompt or upload 1 or more files into the Multi-Document Pipeline first.'
+      );
+      return;
+    }
 
     const finalPrompt =
       promptToUse ||
-      'Analyze this input text with Claude Extended Thinking, suggest missing details, structure it into headings, and humanize it under 10% AI score.';
+      (uploadedDocsPipeline.length > 0
+        ? `Read, analyze, and synthesize all ${uploadedDocsPipeline.length} uploaded document(s) (${uploadedDocsPipeline
+            .map((d) => d.fileName)
+            .join(', ')}) into a complete executive document with all facts locked.`
+        : 'Analyze this input text with Claude Extended Thinking, suggest missing details, structure it into headings, and humanize it under 10% AI score.');
 
-    // Detect if the user explicitly asked for a brand-new document from scratch
     const asksForNewDoc =
       /\b(new document|generate new|start over|from scratch|naya document|nayi file|create a complete|write a complete|mujhe .* chahiye)\b/i.test(
         finalPrompt
@@ -364,58 +512,67 @@ export default function DocumentAgentSuite() {
     const userMsg: ChatGptMessage = {
       id: nextClientId('user'),
       role: 'user',
-      promptText: finalPrompt,
+      promptText:
+        uploadedDocsPipeline.length > 0
+          ? `[Pipeline: ${uploadedDocsPipeline.length} File(s)] ${finalPrompt}`
+          : finalPrompt,
       attachedInputContext: contextToUse || undefined,
       createdAt: new Date().toISOString(),
     };
 
-    setChatMessages((prev) => [...prev, userMsg]);
     if (overridePrompt === undefined) setChatInputPrompt('');
-    setIsGenerating(true);
 
-    // MODE A: Claude Artifact / ChatGPT Canvas Iterative Update of Active Document
-    if (effectiveMode === 'edit_current' && !contextToUse) {
-      setStatusMessage(
-        `Running Claude 6-Stage Extended Thinking to update "${currentDoc.title}" from your prompt...`
-      );
-      try {
-        const { chatReply, updatedDocument } = editDocumentWithChatGptPrompt({
-          doc: currentDoc,
-          promptInstruction: finalPrompt,
-          tone,
-          audience,
-          depthMode: thinkingDepthMode,
-        });
-        setChatMessages((prev) => [...prev, chatReply]);
-        setExpandedThinkingMsgIds((prev) => ({ ...prev, [chatReply.id]: true }));
-        pushVersion(updatedDocument, `Prompt Update: ${finalPrompt.slice(0, 28)}`);
-        setRightView('preview');
-        setStatusMessage(
-          `Claude Extended Thinking Complete — Updated "${updatedDocument.title}" (${
-            updatedDocument.sections.length
-          } sections · ${
-            updatedDocument.thinkingTrace?.microDecisionsCount || 46
-          } micro-decisions verified · ${chatReply.aiScoreAfter}% AI Score).`
-        );
-      } finally {
-        setIsGenerating(false);
-      }
-      return;
-    }
+    // Compute Multi-Doc + Claude Extended Thinking result synchronously (0ms) so every prompt responds IMMEDIATELY without waiting on network
+    const localPipelineResult = executeMultiDocPromptPipeline({
+      prompt: finalPrompt,
+      uploadedDocs: uploadedDocsPipeline,
+      currentDoc,
+      inputContext: contextToUse,
+      mode: effectiveMode,
+      tone,
+      audience,
+      lengthTarget: 'Medium (2–3 Pages)',
+      depthMode: thinkingDepthMode,
+    });
 
-    // MODE B: Generate New Document Artifact from Prompt (then switch to 'edit_current' so subsequent prompts refine it like Claude!)
-    setStatusMessage(
-      'Running Claude 6-Stage Extended Thinking to architect every section from first principles and humanize (<10% AI score)...'
+    const assistantReplyId = localPipelineResult.chatReply.id;
+
+    // Immediately update Chat Thread & Live A4 Document Artifact in 0ms
+    setChatMessages((prev) => [...prev, userMsg, localPipelineResult.chatReply]);
+    pushVersion(
+      localPipelineResult.canonicalDocument,
+      `Prompt: ${finalPrompt.slice(0, 30)}`
     );
+    setChatActionMode('edit_current');
+    setRightView('preview');
+    setStatusMessage(
+      `Prompt Executed${
+        uploadedDocsPipeline.length > 0
+          ? ` Across ${uploadedDocsPipeline.length} Uploaded Files`
+          : ''
+      } — Updated "${localPipelineResult.canonicalDocument.title}" (${
+        localPipelineResult.canonicalDocument.sections.length
+      } sections · ${localPipelineResult.chatReply.aiScoreAfter}% AI Score).`
+    );
+    scrollChatToBottom();
 
+    // Optional non-blocking background server verification
+    setIsGenerating(true);
     try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 3500);
+
       const res = await fetch('/api/documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           mode: 'chatgpt',
           prompt: finalPrompt,
           inputContext: contextToUse,
+          uploadedDocuments: uploadedDocsPipeline,
+          currentDocument: currentDoc,
+          actionMode: effectiveMode,
           tone,
           audience,
           lengthTarget: 'Medium (2–3 Pages)',
@@ -423,70 +580,19 @@ export default function DocumentAgentSuite() {
           depthMode: thinkingDepthMode,
         }),
       });
+      window.clearTimeout(timeoutId);
 
       if (res.ok) {
         const data = await res.json();
-        if (data.chatReply) {
-          setChatMessages((prev) => [...prev, data.chatReply]);
-          setExpandedThinkingMsgIds((prev) => ({ ...prev, [data.chatReply.id]: true }));
-          if (data.document) {
-            pushVersion(data.document, data.document.title.slice(0, 36));
-          }
-          setChatActionMode('edit_current');
-          setRightView('preview');
-          setStatusMessage(
-            `Claude Extended Thinking Complete — Prepared "${
-              data.document?.title || 'Document'
-            }" (${
-              data.document?.thinkingTrace?.microDecisionsCount || 46
-            } micro-decisions verified · ${data.chatReply.aiScoreAfter}% AI Score).`
+        if (data.chatReply && data.document && data.geminiRefined) {
+          setChatMessages((prev) =>
+            prev.map((m) => (m.id === assistantReplyId ? { ...data.chatReply, id: assistantReplyId } : m))
           );
-          return;
+          setCurrentDoc(data.document);
         }
       }
-
-      const fallbackReply = generateChatGptStyleResponse({
-        prompt: finalPrompt,
-        inputContext: contextToUse,
-        tone,
-        audience,
-        depthMode: thinkingDepthMode,
-      });
-      setChatMessages((prev) => [...prev, fallbackReply]);
-      setExpandedThinkingMsgIds((prev) => ({ ...prev, [fallbackReply.id]: true }));
-      if (fallbackReply.canonicalDocument) {
-        pushVersion(
-          fallbackReply.canonicalDocument,
-          fallbackReply.canonicalDocument.title.slice(0, 36)
-        );
-      }
-      setChatActionMode('edit_current');
-      setRightView('preview');
-      setStatusMessage(
-        `Claude Extended Thinking Complete — Prepared "${
-          fallbackReply.canonicalDocument?.title || 'Document'
-        }" (${
-          fallbackReply.canonicalDocument?.thinkingTrace?.microDecisionsCount || 46
-        } micro-decisions verified · ${fallbackReply.aiScoreAfter}% AI Score).`
-      );
     } catch {
-      const fallbackReply = generateChatGptStyleResponse({
-        prompt: finalPrompt,
-        inputContext: contextToUse,
-        tone,
-        audience,
-        depthMode: thinkingDepthMode,
-      });
-      setChatMessages((prev) => [...prev, fallbackReply]);
-      setExpandedThinkingMsgIds((prev) => ({ ...prev, [fallbackReply.id]: true }));
-      if (fallbackReply.canonicalDocument) {
-        pushVersion(
-          fallbackReply.canonicalDocument,
-          fallbackReply.canonicalDocument.title.slice(0, 36)
-        );
-      }
-      setChatActionMode('edit_current');
-      setRightView('preview');
+      // Instant localPipelineResult is already rendered on screen
     } finally {
       setIsGenerating(false);
     }
@@ -712,7 +818,7 @@ export default function DocumentAgentSuite() {
   return (
     <section
       id="ai-document-generator-agent-suite"
-      className="w-full bg-[#171717] text-[#ECECEC] border-t border-[#2F2F2F] py-6 sm:py-10 overflow-x-hidden"
+      className="w-full bg-[#171717] text-[#ECECEC] border-t border-[#2F2F2F] py-6 sm:py-10 overflow-x-hidden [overflow-wrap:anywhere]"
     >
       <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 space-y-4 sm:space-y-5">
         {/* Clean Minimal Dark Section Header */}
@@ -737,8 +843,9 @@ export default function DocumentAgentSuite() {
               <input
                 ref={pdfFileInputRef}
                 type="file"
-                accept=".pdf,.txt,.md"
-                aria-label="Import PDF file into ChatGPT Studio"
+                multiple
+                accept=".pdf,.docx,.txt,.md,.csv,.json"
+                aria-label="Upload Multiple Files into Document Pipeline"
                 onChange={handleUploadPdfFileChange}
                 className="hidden"
               />
@@ -898,6 +1005,13 @@ export default function DocumentAgentSuite() {
 
             <div className="flex flex-wrap items-center justify-between sm:justify-start gap-x-2.5 gap-y-1 text-[11px] sm:text-xs text-[#B4B4B4] font-mono tabular-nums bg-[#1E1E1E] lg:bg-transparent px-3 py-2 lg:p-0 rounded-lg border border-[#2A2A2A] lg:border-0">
               <span>
+                Pipeline Files:{' '}
+                <strong className="text-[#10A37F]">{uploadedDocsPipeline.length}</strong>
+              </span>
+              <span aria-hidden="true" className="text-[#555555]">
+                ·
+              </span>
+              <span>
                 Thinking Checks:{' '}
                 <strong className="text-amber-300">{totalMicroDecisionsCount}</strong>
               </span>
@@ -937,7 +1051,7 @@ export default function DocumentAgentSuite() {
             {sentToTopHumanizerFileName && (
               <a
                 href="#workspace"
-                className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 whitespace-nowrap shrink-0"
+                className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 break-all sm:whitespace-nowrap"
               >
                 View Loaded PDF in Top Humanizer ({sentToTopHumanizerFileName}) ↑
               </a>
@@ -986,21 +1100,21 @@ export default function DocumentAgentSuite() {
           </div>
         </div>
 
-        {/* Main 2-Column Workspace: Left = Claude / ChatGPT Prompt & Extended Thinking Assistant, Right = Live A4 Artifact Document + Micro-Thinking */}
+        {/* Main 2-Column Workspace: Left = Multi-Doc Pipeline + Claude Prompt Assistant, Right = Live A4 Artifact Document + Micro-Thinking */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start min-w-0">
-          {/* LEFT COLUMN (5 cols): Claude / ChatGPT Prompt Builder, 6-Stage Extended Thinking & Iterative Refinements */}
+          {/* LEFT COLUMN (5 cols): Multi-Document Ingestion Pipeline, Claude Extended Thinking & Iterative Prompting */}
           <div
             ref={leftColumnRef}
             className={`lg:col-span-5 min-w-0 bg-[#212121] border border-[#2F2F2F] rounded-xl flex flex-col overflow-hidden ${
               mobilePane === 'document' ? 'hidden lg:flex' : 'flex'
             }`}
           >
-            {/* Mode Toggle & PDF Import Bar */}
+            {/* Multi-Document Pipeline & Mode Toggle Header */}
             <div className="p-3.5 sm:p-4 border-b border-[#2F2F2F] bg-[#181818] space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-[#10A37F]" />
-                  <span>Claude Extended Thinking Mode</span>
+                  <span>Multi-Document Pipeline + Claude Thinking</span>
                 </span>
                 {/* Mode Toggle: Update Live Artifact vs Generate New */}
                 <div
@@ -1033,31 +1147,262 @@ export default function DocumentAgentSuite() {
                 </div>
               </div>
 
-              {/* Import PDF Buttons */}
+              {/* Multi-Document Ingestion Buttons */}
               <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2">
                 <button
                   type="button"
+                  data-testid="upload-multiple-files-btn"
                   disabled={isImportingPdf}
-                  onClick={() => pdfFileInputRef.current?.click()}
-                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-semibold text-white border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  onClick={() => {
+                    uploadModeRef.current = 'append';
+                    pdfFileInputRef.current?.click();
+                  }}
+                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-semibold text-white border border-[#10A37F]/60 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                  <span>{isImportingPdf ? 'Importing...' : 'Upload PDF / Doc (.pdf, .txt)'}</span>
+                  <span>
+                    {isImportingPdf
+                      ? 'Reading Files...'
+                      : uploadedDocsPipeline.length > 0
+                      ? `+ Add More Files (${uploadedDocsPipeline.length} in Pipeline)`
+                      : 'Upload Multiple Files (.pdf, .docx, .txt)'}
+                  </span>
+                </button>
+
+                {uploadedDocsPipeline.length > 0 && (
+                  <button
+                    type="button"
+                    data-testid="replace-pipeline-files-btn"
+                    disabled={isImportingPdf}
+                    onClick={() => {
+                      uploadModeRef.current = 'replace';
+                      pdfFileInputRef.current?.click();
+                    }}
+                    className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#1F2925] hover:bg-[#273630] text-xs font-semibold text-[#10A37F] border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                    <span>Upload My Files (Replace)</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="load-multi-doc-pipeline-btn"
+                  disabled={isImportingPdf}
+                  onClick={handleLoadMultiDocSamplePack}
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <span>Load 3 Sample Files</span>
                 </button>
 
                 <button
                   type="button"
                   disabled={isImportingPdf}
                   onClick={handleLoadSamplePdfToEdit}
-                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                  <span>Load Sample PDF to Edit</span>
+                  <FileText className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
+                  <span>1 Sample PDF</span>
                 </button>
               </div>
 
-              {/* Active Imported PDF Status Box */}
-              {importedPdfMeta && (
+              {/* Active Multi-Document Pipeline Queue & Per-File Analysis Cards (Supports Drag & Drop) */}
+              {uploadedDocsPipeline.length > 0 ? (
+                <div
+                  data-testid="multi-doc-pipeline-queue"
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingOverPipeline(true);
+                  }}
+                  onDragLeave={() => setIsDraggingOverPipeline(false)}
+                  onDrop={handlePipelineDrop}
+                  className={`p-3 rounded-xl border space-y-2.5 transition-colors ${
+                    isDraggingOverPipeline
+                      ? 'bg-[#1B2B25] border-[#10A37F]'
+                      : 'bg-[#141C19] border-[#10A37F]/40'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-semibold text-[#10A37F] flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        Multi-Doc Pipeline Active: {uploadedDocsPipeline.length} File(s) Read &amp;
+                        Analyzed
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-mono text-[#B4B4B4]">
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.pageCount, 0)}p ·{' '}
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.wordCount, 0)}w ·{' '}
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.lockedFacts.length, 0)} facts
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUploadedDocsPipeline([]);
+                          setImportedPdfMeta(null);
+                          setStatusMessage('Cleared all files from Multi-Document Pipeline.');
+                        }}
+                        className="text-[11px] text-[#B4B4B4] hover:text-white px-2 py-0.5 rounded bg-[#1F2D28] border border-[#2E423B] cursor-pointer"
+                      >
+                        Clear All
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 4-Stage Visual Multi-Document Pipeline Status Bar */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10px]">
+                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
+                      <div className="font-semibold text-[#10A37F]">1. Ingested</div>
+                      <div className="font-mono text-[#B4B4B4]">
+                        {uploadedDocsPipeline.length} File(s) Loaded
+                      </div>
+                    </div>
+                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
+                      <div className="font-semibold text-[#10A37F]">2. Read Text</div>
+                      <div className="font-mono text-[#B4B4B4]">
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.pageCount, 0)}p ·{' '}
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.wordCount, 0)}w
+                      </div>
+                    </div>
+                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
+                      <div className="font-semibold text-[#10A37F]">3. Analyzed</div>
+                      <div className="font-mono text-[#B4B4B4]">
+                        {uploadedDocsPipeline.reduce((s, d) => s + d.lockedFacts.length, 0)} Facts
+                        Locked
+                      </div>
+                    </div>
+                    <div className="px-2 py-1 rounded bg-[#1A2622] border border-[#2A3F38] text-[#E2E2E2]">
+                      <div className="font-semibold text-[#10A37F]">4. Prompt Ready</div>
+                      <div className="font-mono text-[#B4B4B4]">
+                        {currentDoc.sections.length} Sections Built
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per-Document Cards with Expandable "Read Text" Inspector */}
+                  <div className="space-y-1.5 max-h-[215px] overflow-y-auto pr-0.5">
+                    {uploadedDocsPipeline.map((doc, idx) => {
+                      const isDocExpanded = Boolean(expandedPipelineDocIds[doc.id]);
+                      return (
+                        <div
+                          key={doc.id}
+                          className="p-2 rounded-lg bg-[#1A2420] border border-[#2A3A34] space-y-1.5 text-xs"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="space-y-0.5 min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="px-1.5 py-0.5 rounded bg-[#10A37F]/20 text-[#10A37F] font-mono text-[10px] font-semibold">
+                                  Doc #{idx + 1} · {doc.fileType}
+                                </span>
+                                <span className="font-semibold text-white break-all sm:truncate max-w-full">
+                                  {doc.fileName}
+                                </span>
+                                <span className="text-[10px] font-mono text-[#9B9B9B]">
+                                  ({doc.pageCount}p · {doc.wordCount}w · {doc.lockedFacts.length}{' '}
+                                  facts)
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-[#B4B4B4] line-clamp-2 break-words">
+                                {doc.summaryInsight}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => togglePipelineDocReader(doc.id)}
+                                className="px-1.5 py-0.5 text-[10px] font-medium text-[#10A37F] hover:text-white rounded bg-[#141C19] border border-[#2A3A34] cursor-pointer"
+                              >
+                                {isDocExpanded ? 'Hide Text' : 'Read Text'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveDocFromPipeline(doc.id)}
+                                aria-label={`Remove ${doc.fileName} from pipeline`}
+                                className="p-1 text-[#9B9B9B] hover:text-white rounded bg-[#141C19] shrink-0 cursor-pointer"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {isDocExpanded && (
+                            <div className="p-2 rounded bg-[#121916] border border-[#24332D] space-y-1.5 text-[11px]">
+                              <div className="font-semibold text-[#10A37F]">
+                                Extracted Text Read from {doc.fileName}:
+                              </div>
+                              <div className="text-[#D4D4D4] whitespace-pre-wrap max-h-[120px] overflow-y-auto leading-relaxed font-sans">
+                                {doc.rawText}
+                              </div>
+                              {doc.lockedFacts.length > 0 && (
+                                <div className="flex flex-wrap gap-1 pt-1 border-t border-[#22302B]">
+                                  <span className="text-[10px] text-[#9B9B9B]">Locked Facts:</span>
+                                  {doc.lockedFacts.map((lf, fIdx) => (
+                                    <span
+                                      key={fIdx}
+                                      className="px-1.5 py-0.5 rounded bg-[#1C2824] text-[#10A37F] font-mono text-[10px]"
+                                    >
+                                      {lf}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 1-Click Multi-Doc Pipeline Prompts */}
+                  <div className="pt-1 border-t border-[#263831] space-y-1.5">
+                    <div className="text-[11px] font-semibold text-[#D4D4D4]">
+                      1-Click Execute Prompt Across All {uploadedDocsPipeline.length} Uploaded
+                      Document(s):
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {MULTI_DOC_PIPELINE_PROMPTS.map((mp, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          data-testid={`multi-doc-prompt-btn-${idx}`}
+                          onClick={() => handleSendPrompt(mp, '', 'generate_new')}
+                          className="text-left px-2.5 py-1.5 rounded-lg bg-[#1F2D28] hover:bg-[#283B34] text-[11px] text-white border border-[#10A37F]/30 transition-colors cursor-pointer leading-snug"
+                        >
+                          {mp} →
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingOverPipeline(true);
+                  }}
+                  onDragLeave={() => setIsDraggingOverPipeline(false)}
+                  onDrop={handlePipelineDrop}
+                  className="p-3 rounded-xl bg-[#161D1A] border border-dashed border-[#10A37F]/40 text-xs text-[#B4B4B4] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                >
+                  <span>
+                    Drag &amp; drop multiple files (.pdf, .docx, .txt, .md, .csv) here or click{' '}
+                    <strong className="text-white">Upload Multiple Files</strong> to start the
+                    pipeline.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleLoadMultiDocSamplePack}
+                    className="px-2.5 py-1 rounded bg-[#1F2D28] text-[#10A37F] font-semibold shrink-0 cursor-pointer"
+                  >
+                    Load 3 Sample Files
+                  </button>
+                </div>
+              )}
+
+              {/* Active Single Imported PDF Status Box (when not using multi-doc queue) */}
+              {importedPdfMeta && uploadedDocsPipeline.length === 0 && (
                 <div className="p-2.5 rounded-lg bg-[#1F2925] border border-[#10A37F]/40 flex items-center justify-between gap-2 text-xs">
                   <div className="text-[#ECECEC] truncate">
                     <span className="font-semibold text-[#10A37F]">Imported PDF Active:</span>{' '}
@@ -1099,9 +1444,12 @@ export default function DocumentAgentSuite() {
               </div>
             </div>
 
-            {/* Conversation, Claude Extended Thinking Trace & AI Missing Details Suggestions */}
-            <div className="p-3.5 sm:p-4 space-y-3.5 max-h-[460px] sm:max-h-[580px] overflow-y-auto">
-              {chatMessages.slice(-4).map((msg) => {
+            {/* Conversation, Multi-Doc Analysis, Claude Extended Thinking Trace & AI Missing Details Suggestions */}
+            <div
+              ref={chatScrollContainerRef}
+              className="p-3.5 sm:p-4 space-y-3.5 max-h-[480px] sm:max-h-[600px] overflow-y-auto"
+            >
+              {chatMessages.slice(-6).map((msg) => {
                 const trace = msg.thinkingTrace || msg.canonicalDocument?.thinkingTrace;
                 const isThinkingExpanded = Boolean(expandedThinkingMsgIds[msg.id]);
 
@@ -1125,6 +1473,44 @@ export default function DocumentAgentSuite() {
                         <strong className="text-[#10A37F]">{msg.aiScoreAfter}%</strong>
                       </span>
                     </div>
+
+                    {/* Multi-Document Pipeline Analysis Badge (if multiple files were read & analyzed) */}
+                    {msg.multiDocAnalysis && (
+                      <div className="p-2.5 rounded-lg bg-[#14201C] border border-[#10A37F]/40 space-y-1.5 text-[11px]">
+                        <div className="font-semibold text-[#10A37F] flex items-center justify-between gap-2">
+                          <span>
+                            Multi-Document Analysis ({msg.multiDocAnalysis.totalFiles} Files ·{' '}
+                            {msg.multiDocAnalysis.totalPages} Pages ·{' '}
+                            {msg.multiDocAnalysis.totalWords} Words)
+                          </span>
+                          <span className="font-mono text-white">
+                            {msg.multiDocAnalysis.totalLockedFactsCount} Locked Facts
+                          </span>
+                        </div>
+                        <p className="text-[#D4D4D4] leading-snug break-words">
+                          {msg.multiDocAnalysis.promptExecutionSummary}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Direct Prompt Execution & Analysis Bullets (Immediate visible response to every user prompt) */}
+                    {msg.directAnswerBullets && msg.directAnswerBullets.length > 0 && (
+                      <div
+                        data-testid="direct-prompt-execution-summary"
+                        className="p-2.5 rounded-lg bg-[#202020] border border-[#343434] space-y-1.5 text-xs"
+                      >
+                        <div className="font-semibold text-white text-[11px] uppercase tracking-wider text-[#10A37F]">
+                          Prompt Execution &amp; Document Analysis Summary:
+                        </div>
+                        <ul className="space-y-1 text-[11px] text-[#E2E2E2] list-disc pl-4 leading-snug">
+                          {msg.directAnswerBullets.map((b, bIdx) => (
+                            <li key={bIdx} className="break-words">
+                              {b}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
 
                     {/* Expandable Claude Extended Thinking (6 Stages · N Micro-Decisions) Block */}
                     {trace && (
@@ -1364,7 +1750,9 @@ export default function DocumentAgentSuite() {
                     }
                   }}
                   placeholder={
-                    chatActionMode === 'edit_current'
+                    uploadedDocsPipeline.length > 0
+                      ? `Ask anything or give any instruction across your ${uploadedDocsPipeline.length} uploaded file(s)...`
+                      : chatActionMode === 'edit_current'
                       ? `Prompt Claude/ChatGPT to update "${currentDoc.title.slice(0, 28)}..." (e.g. 'Add section on ROI')`
                       : "Describe a new document to build from scratch (e.g. 'Business proposal for Nova')..."
                   }
@@ -1376,13 +1764,13 @@ export default function DocumentAgentSuite() {
                     <button
                       type="button"
                       onClick={() => pdfFileInputRef.current?.click()}
-                      title="Import PDF file (.pdf)"
-                      aria-label="Import PDF file (.pdf)"
+                      title="Upload 1 or multiple files (.pdf, .docx, .txt)"
+                      aria-label="Upload 1 or multiple files (.pdf, .docx, .txt)"
                       className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#1F1F1F] hover:bg-[#333333] text-[#ECECEC] border border-[#3D3D3D] flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer"
                     >
                       <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                      <span className="sm:hidden">PDF</span>
-                      <span className="hidden sm:inline">Upload PDF</span>
+                      <span className="sm:hidden">+ Files</span>
+                      <span className="hidden sm:inline">+ Upload Files</span>
                     </button>
 
                     {!showContextBox && (
@@ -1402,6 +1790,7 @@ export default function DocumentAgentSuite() {
 
                   <button
                     type="button"
+                    data-testid="send-prompt-btn"
                     disabled={isGenerating}
                     onClick={() => handleSendPrompt()}
                     className="min-h-[36px] px-3.5 sm:px-4 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
@@ -1412,7 +1801,11 @@ export default function DocumentAgentSuite() {
                       <Send className="w-3.5 h-3.5" />
                     )}
                     <span>
-                      {chatActionMode === 'edit_current' ? 'Update Document' : 'Generate'}
+                      {uploadedDocsPipeline.length > 0
+                        ? `Run on ${uploadedDocsPipeline.length} File(s)`
+                        : chatActionMode === 'edit_current'
+                        ? 'Update Document'
+                        : 'Generate'}
                     </span>
                   </button>
                 </div>
@@ -1697,23 +2090,35 @@ export default function DocumentAgentSuite() {
                             </ul>
                           )}
                           {sec.table && sec.table.rows.length > 0 && (
-                            <div className="overflow-x-auto pt-1.5">
-                              <table className="w-full text-xs border border-slate-300 font-sans">
+                            <div className="overflow-x-auto pt-1.5 max-w-full">
+                              <table className="w-full table-fixed sm:table-auto text-xs border border-slate-300 font-sans">
                                 <thead className="bg-slate-100 text-slate-900">
                                   <tr>
-                                    <th className="p-2 text-left border-b border-slate-300 font-semibold">
-                                      {sec.table.headers[0]}
-                                    </th>
-                                    <th className="p-2 text-left border-b border-slate-300 font-semibold">
-                                      {sec.table.headers[1]}
-                                    </th>
+                                    {sec.table.headers.map((h, hIdx) => (
+                                      <th
+                                        key={hIdx}
+                                        className="p-2 text-left border-b border-slate-300 font-semibold break-words"
+                                      >
+                                        {h}
+                                      </th>
+                                    ))}
                                   </tr>
                                 </thead>
                                 <tbody>
                                   {sec.table.rows.map((r, rIdx) => (
                                     <tr key={rIdx} className="border-b border-slate-200">
-                                      <td className="p-2 font-medium text-slate-900">{r[0]}</td>
-                                      <td className="p-2 text-slate-700">{r[1]}</td>
+                                      {r.map((cell, cIdx) => (
+                                        <td
+                                          key={cIdx}
+                                          className={`p-2 break-words ${
+                                            cIdx === 0
+                                              ? 'font-medium text-slate-900 break-all sm:break-words'
+                                              : 'text-slate-700'
+                                          }`}
+                                        >
+                                          {cell}
+                                        </td>
+                                      ))}
                                     </tr>
                                   ))}
                                 </tbody>

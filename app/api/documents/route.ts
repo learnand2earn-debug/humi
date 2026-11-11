@@ -2,20 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 import {
   buildStructuredDocumentFromInputs,
-  generateChatGptStyleResponse,
+  executeMultiDocPromptPipeline,
   DOCUMENT_TYPE_CATALOG,
   AgentRewriteTone,
   AudienceLevel,
   runControlledHumanizePipeline,
   CanonicalDocumentModel,
   ClaudeThinkingDepthMode,
+  PipelineUploadedDocument,
   synthesizeSectionProseAndMicroThinking,
 } from '@/lib/document-agent-engine';
 
 /**
  * Section 4, 9, 10, 12 & 13 — Backend API Flow (`POST /api/documents`):
  * Supports both:
- * 1. ChatGPT / Claude Extended Thinking Conversational Content & Document Generation (`mode: 'chatgpt'`)
+ * 1. Multi-Document Pipeline + ChatGPT / Claude Extended Thinking Conversational Content & Document Generation (`mode: 'chatgpt'`)
  * 2. Smart Form + Outline Wizard Generation (`mode: 'wizard'`)
  * Uses `gemini-3.8-flash` on the server with automatic deterministic Controlled Humanizer fallback.
  */
@@ -26,6 +27,9 @@ export async function POST(req: NextRequest) {
       mode = 'wizard',
       prompt: chatPrompt = '',
       inputContext = '',
+      uploadedDocuments = [],
+      currentDocument = null,
+      actionMode = 'generate_new',
       documentTypeId = 'business_proposal',
       inputs = {},
       customPrompt = '',
@@ -39,6 +43,9 @@ export async function POST(req: NextRequest) {
       mode?: 'wizard' | 'chatgpt';
       prompt?: string;
       inputContext?: string;
+      uploadedDocuments?: PipelineUploadedDocument[];
+      currentDocument?: CanonicalDocumentModel | null;
+      actionMode?: 'generate_new' | 'edit_current';
       documentTypeId?: string;
       inputs?: Record<string, string>;
       customPrompt?: string;
@@ -52,20 +59,33 @@ export async function POST(req: NextRequest) {
 
     const apiKey = process.env.GEMINI_API_KEY;
 
-    // MODE 1: ChatGPT / Claude Extended Thinking Conversational AI Content Generator + Humanizer
+    // MODE 1: Multi-Document Pipeline + ChatGPT / Claude Extended Thinking Conversational AI Content Generator + Humanizer
     if (mode === 'chatgpt') {
-      const baseChatReply = generateChatGptStyleResponse({
+      const pipelineResult = executeMultiDocPromptPipeline({
         prompt: chatPrompt,
+        uploadedDocs: Array.isArray(uploadedDocuments) ? uploadedDocuments : [],
+        currentDoc: currentDocument,
         inputContext,
+        mode: actionMode,
         tone,
         audience,
         lengthTarget,
         depthMode,
       });
 
-      let engineUsed = 'controlled-humanizer-pipeline';
-      let inputTokens = Math.max(180, Math.round((chatPrompt.length + inputContext.length) / 4));
-      let outputTokens = 760;
+      const baseChatReply = pipelineResult.chatReply;
+      let engineUsed =
+        uploadedDocuments.length > 0
+          ? `multi-doc-pipeline (${uploadedDocuments.length} files) + controlled-humanizer`
+          : 'controlled-humanizer-pipeline';
+      const docsTextLen = Array.isArray(uploadedDocuments)
+        ? uploadedDocuments.reduce((acc, d) => acc + (d.rawText?.length || 0), 0)
+        : 0;
+      let inputTokens = Math.max(
+        180,
+        Math.round((chatPrompt.length + inputContext.length + docsTextLen) / 4)
+      );
+      let outputTokens = 820;
 
       if (
         useGeminiRefinement &&
@@ -74,17 +94,32 @@ export async function POST(req: NextRequest) {
         apiKey.trim().length > 10
       ) {
         try {
-          const ai = new GoogleGenAI({ apiKey });
-          const systemInstruction = `You are a Claude Extended Thinking + ChatGPT-style AI Document & Content Architect with a built-in Controlled Humanizer (<10% AI detector score).
-Follow the user's prompt in English, Urdu, or Roman Urdu and transform any provided input content accurately using deep first-principles reasoning (${depthMode}).
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+          });
+          const systemInstruction = `You are a Claude Extended Thinking + Multi-Document Pipeline Architect with a built-in Controlled Humanizer (<10% AI detector score).
+Read and analyze all uploaded documents and the user's prompt in English, Urdu, or Roman Urdu, and transform or synthesize them using deep first-principles reasoning (${depthMode}).
 STRICT RULES:
-1. Never invent fake statistics or alter numbers/dates/names from the user's input.
+1. Never invent fake statistics or alter numbers/dates/names from the uploaded documents or user input.
 2. Make every section genuinely distinct with non-repetitive, first-principles prose.
 3. Write in a natural, grounded human voice (${tone} tone for ${audience}) with varied sentence lengths, contractions where natural, and zero robotic clichés ("delve", "testament", "tapestry", "furthermore", "moreover", "underscore").
 4. Return valid JSON matching the requested schema.`;
 
+          const uploadedDocsDigest =
+            Array.isArray(uploadedDocuments) && uploadedDocuments.length > 0
+              ? `\nUploaded Multi-Document Pipeline (${uploadedDocuments.length} Files):\n` +
+                uploadedDocuments
+                  .map(
+                    (d, idx) =>
+                      `[Doc ${idx + 1}: ${d.fileName} (${d.pageCount} pages, ${d.wordCount} words)]\nLocked Facts: ${(d.lockedFacts || []).join(', ')}\nText:\n${(d.rawText || '').slice(0, 2000)}`
+                  )
+                  .join('\n\n')
+              : '';
+
           const userMessage = `User Prompt: ${chatPrompt}
-${inputContext ? `\nInput Content / Source Text to Process:\n${inputContext}` : ''}
+${uploadedDocsDigest}
+${inputContext ? `\nAdditional Context / Pasted Text:\n${inputContext}` : ''}
 Target Tone: ${tone}
 Target Audience: ${audience}
 Target Length: ${lengthTarget}
@@ -93,7 +128,8 @@ Claude Thinking Depth Mode: ${depthMode}
 Return JSON:
 {
   "title": "Document or Content Title",
-  "assistantIntro": "1-2 sentence helpful conversational intro (in the same language style as the user)",
+  "assistantIntro": "1-2 sentence helpful conversational intro (in the same language style as the user) explaining how the uploaded documents and prompt were analyzed",
+  "directAnswerBullets": ["Direct answer / analysis point 1", "Direct answer / analysis point 2", "Direct answer / analysis point 3"],
   "sections": [
     {
       "heading": "Section Heading",
@@ -109,7 +145,6 @@ Return JSON:
             contents: userMessage,
             config: {
               systemInstruction,
-              temperature: 0.7,
               responseMimeType: 'application/json',
             },
           });
@@ -117,8 +152,13 @@ Return JSON:
           const rawJson = response.text?.trim();
           if (rawJson) {
             const parsed = JSON.parse(rawJson);
-            if (parsed && Array.isArray(parsed.sections) && parsed.sections.length > 0 && baseChatReply.canonicalDocument) {
-              engineUsed = 'gemini-3.8-flash + controlled-humanizer-lock';
+            if (
+              parsed &&
+              Array.isArray(parsed.sections) &&
+              parsed.sections.length > 0 &&
+              baseChatReply.canonicalDocument
+            ) {
+              engineUsed = 'gemini-3.8-flash + multi-doc-humanizer-lock';
               inputTokens = Math.round(userMessage.length / 4);
               outputTokens = Math.round(rawJson.length / 4);
 
@@ -126,6 +166,11 @@ Return JSON:
                 DOCUMENT_TYPE_CATALOG.find(
                   (d) => d.id === baseChatReply.canonicalDocument!.documentTypeId
                 ) || DOCUMENT_TYPE_CATALOG[3];
+
+              const existingTable =
+                baseChatReply.canonicalDocument.sections[
+                  baseChatReply.canonicalDocument.sections.length - 1
+                ]?.table;
 
               const updatedSections = parsed.sections.map(
                 (
@@ -160,6 +205,7 @@ Return JSON:
                     originalParagraphs: rawParas,
                     paragraphs: pipeline.humanizedParagraphs,
                     bullets: Array.isArray(sec.bullets) ? sec.bullets : [],
+                    table: idx === parsed.sections.length - 1 ? existingTable : undefined,
                     humanizeStatus: 'humanized' as const,
                     pipelineStage: 'Final Humanized Text' as const,
                     lockedFacts: pipeline.lockedFacts,
@@ -178,8 +224,14 @@ Return JSON:
                 parsed.title || baseChatReply.canonicalDocument.title;
               baseChatReply.canonicalDocument.sections = updatedSections;
               baseChatReply.assistantIntro = parsed.assistantIntro || baseChatReply.assistantIntro;
+              if (Array.isArray(parsed.directAnswerBullets) && parsed.directAnswerBullets.length > 0) {
+                baseChatReply.directAnswerBullets = parsed.directAnswerBullets;
+              }
               baseChatReply.rawAiContent = updatedSections
-                .map((s: { heading: string; originalParagraphs: string[] }) => `### ${s.heading}\n${s.originalParagraphs.join('\n\n')}`)
+                .map(
+                  (s: { heading: string; originalParagraphs: string[] }) =>
+                    `### ${s.heading}\n${s.originalParagraphs.join('\n\n')}`
+                )
                 .join('\n\n');
               baseChatReply.humanizedContent = updatedSections
                 .map((s: { heading: string; paragraphs: string[]; bullets: string[] }) => {
@@ -194,13 +246,14 @@ Return JSON:
             }
           }
         } catch {
-          engineUsed = 'controlled-humanizer-fallback';
+          engineUsed = 'multi-doc-controlled-humanizer-fallback';
         }
       }
 
       return NextResponse.json({
         chatReply: baseChatReply,
         document: baseChatReply.canonicalDocument,
+        multiDocAnalysis: pipelineResult.multiDocAnalysis,
         usage: {
           operation: 'Draft Generation',
           engine: engineUsed,
@@ -245,7 +298,10 @@ Return JSON:
       apiKey.trim().length > 10
     ) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
         const filledContext = Object.entries(inputs)
           .filter(([, v]) => v && v.trim().length > 0)
           .map(([k, v]) => `- ${k}: ${v}`)
@@ -289,7 +345,6 @@ Return a JSON object with:
           contents: prompt,
           config: {
             systemInstruction,
-            temperature: 0.7,
             responseMimeType: 'application/json',
           },
         });

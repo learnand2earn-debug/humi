@@ -15,8 +15,11 @@ import {
   autoFillAllFromSinglePrompt,
   applyPromptToDocumentOrSection,
   SAMPLE_IMPORTED_PDF_DATA,
+  SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
   buildCanonicalDocumentFromImportedText,
   editDocumentWithChatGptPrompt,
+  analyzeMultiDocumentPipeline,
+  executeMultiDocPromptPipeline,
 } from './document-agent-engine';
 
 test('Step B & C: analyzeRequirementsAndMissingInfo detects missing required fields and generates Roman Urdu + English questions with 3 AI suggested answers', () => {
@@ -306,3 +309,92 @@ test('Claude Extended Thinking Engine: generates 6-stage thinking trace, per-sec
     `Expected distinct non-repetitive prose across sections, got ${firstSentences.size} unique openings`
   );
 });
+
+test('Multi-Document Ingestion, Reading & Analysis Pipeline: reads 3 uploaded documents, locks all cross-document facts, and executes user prompt into unified A4 document + direct answer bullets', () => {
+  assert.equal(SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length, 3);
+
+  const analysis = analyzeMultiDocumentPipeline(
+    SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    'Combine all 3 uploaded documents into a Master Business Proposal with ROI and 99.99% SLA'
+  );
+
+  assert.equal(analysis.totalFiles, 3);
+  assert.equal(analysis.totalPages, 6);
+  assert.ok(analysis.totalWords > 100);
+  assert.ok(analysis.totalLockedFactsCount >= 6);
+  assert.ok(analysis.combinedLockedFacts.some((f) => f.includes('$8,500') || f.includes('68.4%') || f.includes('99.99%')));
+  assert.ok(analysis.crossDocumentSynthesis.length >= 4);
+
+  const result = executeMultiDocPromptPipeline({
+    prompt: 'Analyze all 3 uploaded files and create a complete Master Proposal with budgets, ROAS targets, and 99.99% SLA architecture',
+    uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    mode: 'generate_new',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+    depthMode: 'extended_deep',
+  });
+
+  assert.ok(result.multiDocAnalysis);
+  assert.equal(result.multiDocAnalysis!.totalFiles, 3);
+  assert.ok(result.chatReply.directAnswerBullets && result.chatReply.directAnswerBullets.length >= 4);
+  assert.ok(result.canonicalDocument.sections.length >= 5);
+  assert.ok(result.chatReply.aiScoreAfter! < 10);
+
+  // Verify the final section includes the Cross-Document Comparison Matrix table covering all 3 uploaded files
+  const lastSec = result.canonicalDocument.sections[result.canonicalDocument.sections.length - 1];
+  assert.ok(lastSec.table, 'Expected Cross-Document Comparison Table on final section');
+  assert.equal(lastSec.table!.rows.length, 3, 'Expected 1 table row per uploaded document');
+
+  // 2. Test Compare & Risk Audit prompt across the 3 uploaded documents
+  const compareResult = executeMultiDocPromptPipeline({
+    prompt: 'Compare all uploaded files and build a Cross-Document Risk & SLA Audit report',
+    uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    currentDoc: result.canonicalDocument,
+    mode: 'edit_current',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+  assert.ok(compareResult.canonicalDocument.title.includes('Comparison & Risk Audit'));
+  assert.ok(compareResult.chatReply.directAnswerBullets![0].includes('Cross-Document Comparison & Risk Audit'));
+
+  // 3. Test Extract Budgets, KPIs & Timelines prompt across the 3 uploaded documents
+  const extractResult = executeMultiDocPromptPipeline({
+    prompt: 'Extract every budget figure, ROI metric, and timeline from all uploaded files into a ledger',
+    uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    currentDoc: compareResult.canonicalDocument,
+    mode: 'edit_current',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+  assert.ok(extractResult.canonicalDocument.title.includes('Extracted Financial, KPI & Timeline Ledger'));
+  assert.ok(extractResult.chatReply.directAnswerBullets![0].includes('Extracted Financial, KPI & Timeline Ledger'));
+
+  // 4. Test 1-Page Executive Summary prompt across the 3 uploaded documents
+  const summaryResult = executeMultiDocPromptPipeline({
+    prompt: 'Condense all uploaded documents into a 1-Page Executive Summary in C-Suite tone',
+    uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    currentDoc: extractResult.canonicalDocument,
+    mode: 'edit_current',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+  assert.equal(summaryResult.canonicalDocument.sections.length, 3);
+  assert.ok(summaryResult.canonicalDocument.title.includes('1-Page Executive Multi-Doc Brief'));
+
+  // 5. Test Iterative Add Section prompt while 3 documents remain in the pipeline
+  const addSectionResult = executeMultiDocPromptPipeline({
+    prompt: 'Add a new section on Zero-Downtime Cloud Migration & SOC2 Compliance',
+    uploadedDocs: SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+    currentDoc: result.canonicalDocument,
+    mode: 'edit_current',
+    tone: 'Persuasive',
+    audience: 'Executive / C-Suite',
+  });
+  assert.equal(
+    addSectionResult.canonicalDocument.sections.length,
+    result.canonicalDocument.sections.length + 1
+  );
+  assert.ok(addSectionResult.multiDocAnalysis);
+});
+
+
