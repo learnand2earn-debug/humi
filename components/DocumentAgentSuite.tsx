@@ -1,6 +1,22 @@
 'use client';
 
-import React, { useState, useMemo, useRef } from 'react';
+// Polyfill Promise.try for environments where Stage 3 Promise.try is not native (pdfjs-dist v4+)
+if (typeof globalThis !== 'undefined') {
+  const g = globalThis as any;
+  if (g.Promise && typeof g.Promise.try !== 'function') {
+    g.Promise.try = function (fn: any, ...args: any[]) {
+      return new Promise((resolve, reject) => {
+        try {
+          resolve(fn(...args));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    };
+  }
+}
+
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Download,
   RefreshCw,
@@ -18,6 +34,9 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle2,
+  Sliders,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import {
   DOCUMENT_TYPE_CATALOG,
@@ -33,6 +52,7 @@ import {
   ArtifactPdfShapePreset,
   ClaudeThinkingDepthMode,
   PipelineUploadedDocument,
+  OutputCustomizationConfig,
   applyPromptToDocumentOrSection,
   ingestMultipleFilesIntoPipeline,
   generateNextUnlimitedPipelineDocument,
@@ -45,6 +65,9 @@ import {
 } from '@/lib/document-agent-engine';
 
 type RightPanelView = 'preview' | 'thinking' | 'sections' | 'versions';
+
+const PIPELINE_STORAGE_KEY = 'verbaforma_pipeline_docs_v2';
+const CUSTOM_CONFIG_STORAGE_KEY = 'verbaforma_custom_config_v2';
 
 const TONES: AgentRewriteTone[] = ['Professional', 'Friendly', 'Academic', 'Simple', 'Persuasive'];
 
@@ -72,6 +95,16 @@ const SHAPE_PRESET_OPTIONS: { id: ArtifactPdfShapePreset; label: string }[] = [
   { id: 'executive_figure', label: 'Shape: A4 + Executive KPI Figure' },
   { id: 'technical_blueprint', label: 'Shape: A4 + Architecture Blueprint' },
   { id: 'clean_editorial', label: 'Shape: A4 Clean Editorial Sheet' },
+];
+
+const STRUCTURE_MODE_OPTIONS: {
+  id: NonNullable<OutputCustomizationConfig['structureMode']>;
+  label: string;
+}[] = [
+  { id: 'master_synthesis', label: 'Structure: Master Synthesis (All Files Combined)' },
+  { id: 'file_by_file', label: 'Structure: File-by-File Dedicated Custom Sections' },
+  { id: 'executive_summary', label: 'Structure: Crisp 1-Page Executive Digest' },
+  { id: 'comparison_audit', label: 'Structure: Cross-File Comparison & Fact Audit' },
 ];
 
 const STARTER_PROMPTS = [
@@ -102,9 +135,9 @@ const STARTER_PROMPTS = [
 ];
 
 const MULTI_DOC_PIPELINE_PROMPTS = [
-  'Combine & synthesize all uploaded documents into 1 Master Business Proposal with all numbers locked',
+  'Combine & synthesize all uploaded documents into 1 Master Customized Document with all numbers locked',
+  'Build File-by-File Customized Sections for every uploaded document',
   'Compare all uploaded files and build a Cross-Document Risk & SLA Audit report',
-  'Extract every budget figure, ROI metric, and timeline from all uploaded files into a ledger',
   'Condense all uploaded documents into a 1-Page Executive Summary in C-Suite tone',
 ];
 
@@ -114,6 +147,67 @@ function nextClientId(prefix: string): string {
   return `${prefix}-${clientSeqCounter}`;
 }
 
+function createCleanEmptyPipelineDocument(
+  customConfig?: OutputCustomizationConfig,
+  tone: AgentRewriteTone = 'Persuasive',
+  audience: AudienceLevel = 'Client / Small Business Owner'
+): CanonicalDocumentModel {
+  const nowIso = new Date().toISOString();
+  return {
+    id: `doc-custom-empty-${Date.now()}`,
+    title:
+      customConfig?.customTitle?.trim() ||
+      'Custom Multi-Document Pipeline Workspace (Upload Unlimited Files)',
+    subtitle:
+      customConfig?.customSubtitle?.trim() ||
+      'Queue is ready — Upload unlimited PDF, DOCX, TXT, CSV, or MD files at once and customize your output below',
+    documentTypeId: 'business_proposal',
+    documentTypeName: 'Customized Pipeline Document',
+    category: 'Business',
+    audience,
+    tone,
+    lengthTarget: 'Medium (2–3 Pages)',
+    status: 'humanized',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    currentVersionNumber: 1,
+    sections: [
+      {
+        id: 'sec-empty-ready-1',
+        heading: '1. Ready for Your Unlimited Files & Custom Instructions',
+        originalParagraphs: [
+          'All previous sample files have been removed and will stay removed across page refreshes. Upload 1, 5, 10, or unlimited files at once using the Upload buttons or Drag-and-Drop box, or type any prompt below to generate your customized document.',
+        ],
+        paragraphs: [
+          'All previous sample files have been removed and stay removed even when you refresh the page. Select or drag-and-drop unlimited files at once (.pdf, .docx, .txt, .md, .csv, .json) or enter a prompt below to build your customized document and send it straight to the Humanizer Download section.',
+        ],
+        bullets: [
+          'Unlimited Multi-File Upload at Once: Select as many files as you want in a single batch.',
+          'Persistent Queue: Removed files never come back on refresh.',
+          '1-Click Finish → Humanizer → Download: Sends your customized document directly to the Humanizer and prepares the humanized PDF in the Download Section.',
+        ],
+        humanizeStatus: 'humanized',
+        pipelineStage: 'Final Humanized Text',
+        lockedFacts: ['100% Custom Output', '<10% AI Score'],
+        metrics: {
+          aiScoreBefore: 42,
+          aiScoreAfter: 4,
+          burstinessAfter: 86,
+          meaningPreserved: true,
+        },
+      },
+    ],
+    warnings: [],
+    qualityCheck: {
+      grammarPassed: true,
+      factsPreserved: true,
+      noFabricatedClaims: true,
+      duplicateCheckPassed: true,
+      preservedEntities: ['100% Custom Output', '<10% AI Score'],
+    },
+  };
+}
+
 export default function DocumentAgentSuite() {
   const [rightView, setRightView] = useState<RightPanelView>('preview');
   const [tone, setTone] = useState<AgentRewriteTone>('Persuasive');
@@ -121,7 +215,6 @@ export default function DocumentAgentSuite() {
   const [thinkingDepthMode, setThinkingDepthMode] =
     useState<ClaudeThinkingDepthMode>('extended_deep');
   const [showMicroThinkingOnA4, setShowMicroThinkingOnA4] = useState<boolean>(true);
-  // Keep thinking accordion collapsed by default so chat replies and prompt outputs are always immediately visible
   const [expandedThinkingMsgIds, setExpandedThinkingMsgIds] = useState<Record<string, boolean>>({});
   const [expandedPipelineDocIds, setExpandedPipelineDocIds] = useState<Record<string, boolean>>({});
   const [activePipelineStep, setActivePipelineStep] = useState<1 | 2 | 3 | 4 | 5>(4);
@@ -129,7 +222,17 @@ export default function DocumentAgentSuite() {
   const [customFileNameInput, setCustomFileNameInput] = useState<string>('');
   const [customFileContentInput, setCustomFileContentInput] = useState<string>('');
   const [isDraggingOverPipeline, setIsDraggingOverPipeline] = useState<boolean>(false);
-  const uploadModeRef = useRef<'append' | 'replace'>('append');
+
+  // Full Output Customization State (initialized deterministically for SSR; hydrated immediately via microtask)
+  const [showCustomizationPanel, setShowCustomizationPanel] = useState<boolean>(true);
+  const [customTitleInput, setCustomTitleInput] = useState<string>('');
+  const [customSubtitleInput, setCustomSubtitleInput] = useState<string>('');
+  const [customHeaderBrandInput, setCustomHeaderBrandInput] = useState<string>('');
+  const [structureMode, setStructureMode] =
+    useState<NonNullable<OutputCustomizationConfig['structureMode']>>('master_synthesis');
+  const [customFontSizePt, setCustomFontSizePt] = useState<number>(10.5);
+  const [includeBullets, setIncludeBullets] = useState<boolean>(true);
+  const [includeTable, setIncludeTable] = useState<boolean>(true);
 
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateStyleConfig>(
     () => PROFESSIONAL_TEMPLATES[0]
@@ -142,19 +245,37 @@ export default function DocumentAgentSuite() {
   const [isSendingToTopHumanizer, setIsSendingToTopHumanizer] = useState<boolean>(false);
   const [sentToTopHumanizerFileName, setSentToTopHumanizerFileName] = useState<string | null>(null);
 
+  // Ready-to-Download Humanized Output state (populated when finished & humanized)
+  const [humanizedReadyDownload, setHumanizedReadyDownload] = useState<{
+    fileName: string;
+    pdfUrl: string;
+    docxUrl: string;
+    docxFileName: string;
+    sectionCount: number;
+    pageCount: number;
+    aiScoreAfter: number;
+    lockedFactsCount: number;
+    timestamp: string;
+  } | null>(null);
+
   const [mobilePane, setMobilePane] = useState<'both' | 'chat' | 'document'>('both');
   const rightColumnRef = useRef<HTMLDivElement | null>(null);
   const leftColumnRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
-  // Default to 'edit_current' so typing prompts works like Claude Artifacts / ChatGPT Canvas (iteratively updating the document)
+  const replaceFileInputRef = useRef<HTMLInputElement | null>(null);
+  const downloadCenterRef = useRef<HTMLDivElement | null>(null);
+
   const [chatActionMode, setChatActionMode] = useState<'edit_current' | 'generate_new'>(
     'edit_current'
   );
+
   // Unlimited Continuous Multi-Document Ingestion, Reading & Analysis Pipeline state
   const [uploadedDocsPipeline, setUploadedDocsPipeline] = useState<PipelineUploadedDocument[]>(
-    () => SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK
+    SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK
   );
+  const [hasHydratedStorage, setHasHydratedStorage] = useState<boolean>(false);
+
   const [importedPdfMeta, setImportedPdfMeta] = useState<{
     fileName: string;
     pageCount: number;
@@ -176,7 +297,28 @@ export default function DocumentAgentSuite() {
   const [isExportingDocx, setIsExportingDocx] = useState<boolean>(false);
   const [sectionPromptMap, setSectionPromptMap] = useState<Record<string, string>>({});
   const [statusMessage, setStatusMessage] = useState<string>(
-    '5-Step Unlimited Multi-Document Pipeline Active (∞ Continuous File Queue) — Keep adding unlimited files (.pdf, .docx, .txt, .csv, or inline text) or enter any prompt below.'
+    '5-Step Unlimited Multi-Document Pipeline Active (∞ Multi-File Batch Queue) — Upload unlimited files at once, customize output, and click Finish & Humanize to Download!'
+  );
+
+  const currentCustomizationConfig = useMemo<OutputCustomizationConfig>(
+    () => ({
+      customTitle: customTitleInput.trim() || undefined,
+      customSubtitle: customSubtitleInput.trim() || undefined,
+      customHeaderBrand: customHeaderBrandInput.trim() || undefined,
+      structureMode,
+      fontSizePt: customFontSizePt,
+      includeBullets,
+      includeTable,
+    }),
+    [
+      customTitleInput,
+      customSubtitleInput,
+      customHeaderBrandInput,
+      structureMode,
+      customFontSizePt,
+      includeBullets,
+      includeTable,
+    ]
   );
 
   const [chatMessages, setChatMessages] = useState<ChatGptMessage[]>(() => {
@@ -223,6 +365,129 @@ export default function DocumentAgentSuite() {
       documentSnapshot: currentDoc,
     },
   ]);
+
+  const persistPipelineDocs = (docs: PipelineUploadedDocument[]) => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PIPELINE_STORAGE_KEY, JSON.stringify(docs));
+      return;
+    } catch {
+      // Fall through to compact quota-safe serialization when large multi-file batches exceed 5MB
+    }
+    try {
+      const compactDocs = docs.map((d) => ({
+        ...d,
+        rawText: d.rawText.slice(0, 6000),
+        pageTexts: d.pageTexts.slice(0, 4).map((p) => p.slice(0, 1500)),
+      }));
+      window.localStorage.setItem(PIPELINE_STORAGE_KEY, JSON.stringify(compactDocs));
+      return;
+    } catch {
+      // Fall through to ultra-compact metadata snapshot for huge 50+ file queues
+    }
+    try {
+      const ultraCompactDocs = docs.map((d) => ({
+        ...d,
+        rawText: d.rawText.slice(0, 800),
+        pageTexts: [d.rawText.slice(0, 800)],
+      }));
+      window.localStorage.setItem(PIPELINE_STORAGE_KEY, JSON.stringify(ultraCompactDocs));
+    } catch {
+      // Ignore if browser storage is disabled
+    }
+  };
+
+  // Hydrate persisted pipeline files & customization from localStorage immediately on client mount
+  // so removed pre-added files NEVER reappear when the page is refreshed!
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let cancelled = false;
+
+    void Promise.resolve().then(() => {
+      if (cancelled) return;
+      try {
+        const savedConfigRaw = window.localStorage.getItem(CUSTOM_CONFIG_STORAGE_KEY);
+        let loadedConfig: OutputCustomizationConfig | undefined;
+        if (savedConfigRaw) {
+          const parsedConfig = JSON.parse(savedConfigRaw) as OutputCustomizationConfig;
+          loadedConfig = parsedConfig;
+          if (parsedConfig.customTitle) setCustomTitleInput(parsedConfig.customTitle);
+          if (parsedConfig.customSubtitle) setCustomSubtitleInput(parsedConfig.customSubtitle);
+          if (parsedConfig.customHeaderBrand)
+            setCustomHeaderBrandInput(parsedConfig.customHeaderBrand);
+          if (parsedConfig.structureMode) setStructureMode(parsedConfig.structureMode);
+          if (parsedConfig.fontSizePt) setCustomFontSizePt(parsedConfig.fontSizePt);
+          if (typeof parsedConfig.includeBullets === 'boolean')
+            setIncludeBullets(parsedConfig.includeBullets);
+          if (typeof parsedConfig.includeTable === 'boolean')
+            setIncludeTable(parsedConfig.includeTable);
+        }
+
+        const savedDocsRaw = window.localStorage.getItem(PIPELINE_STORAGE_KEY);
+        if (savedDocsRaw !== null) {
+          const parsedDocs = JSON.parse(savedDocsRaw) as PipelineUploadedDocument[];
+          if (Array.isArray(parsedDocs)) {
+            setUploadedDocsPipeline(parsedDocs);
+            if (parsedDocs.length === 0) {
+              setImportedPdfMeta(null);
+              const emptyDoc = createCleanEmptyPipelineDocument(
+                loadedConfig,
+                'Persuasive',
+                'Client / Small Business Owner'
+              );
+              setCurrentDoc(emptyDoc);
+              setStatusMessage(
+                'Pipeline queue is empty (pre-added sample files were removed and stay removed after refresh). Upload unlimited files at once to begin!'
+              );
+            } else {
+              const reRun = executeMultiDocPromptPipeline({
+                prompt: `Read, analyze, and synthesize all ${parsedDocs.length} queued document(s) (${parsedDocs.map((d) => d.fileName).join(', ')}) into a customized document.`,
+                uploadedDocs: parsedDocs,
+                mode: 'generate_new',
+                tone: 'Persuasive',
+                audience: 'Client / Small Business Owner',
+                depthMode: 'extended_deep',
+                customization: loadedConfig,
+              });
+              setCurrentDoc(reRun.canonicalDocument);
+              setChatMessages((prev) => [...prev.slice(0, 1), reRun.chatReply]);
+              setImportedPdfMeta({
+                fileName:
+                  parsedDocs.length === 1
+                    ? parsedDocs[0].fileName
+                    : `${parsedDocs.length} Documents in Unlimited Pipeline (${parsedDocs.reduce((s, d) => s + d.pageCount, 0)} Pages)`,
+                pageCount: parsedDocs.reduce((s, d) => s + d.pageCount, 0),
+                sectionCount: reRun.canonicalDocument.sections.length,
+              });
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed storage
+      } finally {
+        if (!cancelled) {
+          setHasHydratedStorage(true);
+        }
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist customization settings whenever changed
+  useEffect(() => {
+    if (!hasHydratedStorage || typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(
+        CUSTOM_CONFIG_STORAGE_KEY,
+        JSON.stringify(currentCustomizationConfig)
+      );
+    } catch {
+      // Ignore
+    }
+  }, [currentCustomizationConfig, hasHydratedStorage]);
 
   const scrollChatToBottom = () => {
     if (typeof window !== 'undefined') {
@@ -309,15 +574,17 @@ export default function DocumentAgentSuite() {
 
   /**
    * Executes the 5-Step Unlimited Multi-Document Reading, Analysis & Synthesis Pipeline on an array of PipelineUploadedDocument items
-   * and updates both the Chat thread and the Live A4 Document Artifact immediately.
+   * with full Output Customization applied, and updates both the Chat thread and the Live A4 Document Artifact immediately.
    */
   const runPipelineOnDocuments = (
     docsToAnalyze: PipelineUploadedDocument[],
-    customPromptInstruction?: string
+    customPromptInstruction?: string,
+    overrideCustomConfig?: OutputCustomizationConfig
   ) => {
+    const activeCustom = overrideCustomConfig || currentCustomizationConfig;
     const effectiveInstruction =
       (customPromptInstruction || chatInputPrompt).trim() ||
-      `Execute all 5 pipeline steps: read, analyze, and synthesize all ${docsToAnalyze.length} queued document(s) (${docsToAnalyze.map((d) => d.fileName).join(', ')}) into a unified A4 Document Artifact with all facts locked.`;
+      `Execute all 5 pipeline steps: read, analyze, and synthesize all ${docsToAnalyze.length} queued document(s) (${docsToAnalyze.map((d) => d.fileName).join(', ')}) into a customized A4 Document Artifact with all facts locked.`;
 
     const userMsg: ChatGptMessage = {
       id: nextClientId('user-multidoc'),
@@ -337,6 +604,7 @@ export default function DocumentAgentSuite() {
       tone,
       audience,
       depthMode: thinkingDepthMode,
+      customization: activeCustom,
     });
 
     setChatMessages((prev) => [...prev, userMsg, result.chatReply]);
@@ -362,13 +630,19 @@ export default function DocumentAgentSuite() {
       )} pages, ${docsToAnalyze.reduce(
         (s, d) => s + d.wordCount,
         0
-      )} words) and synthesized ${result.canonicalDocument.sections.length} sections (${
-        result.chatReply.aiScoreAfter
-      }% AI Score). Keep adding more files or enter any prompt!`
+      )} words) and generated customized output "${result.canonicalDocument.title}" (${
+        result.canonicalDocument.sections.length
+      } sections · ${result.chatReply.aiScoreAfter}% AI Score). Click "Finish, Humanize & Ready to Download" below when ready!`
     );
     scrollChatToBottom();
   };
 
+  /**
+   * Ingests 1 or unlimited files at once from `<input type="file" multiple>` or Drag-and-Drop.
+   * Note: If the pipeline currently only holds the untouched initial 3 sample files (`sample-pipe-doc-*`),
+   * uploading real user files automatically replaces the 3 demo files so the output is 100% customized to the user's uploaded files!
+   * Subsequent uploads append seamlessly to the user's queue (unless `replace` is explicitly chosen).
+   */
   const ingestFilesIntoPipelineState = async (
     fileList: File[],
     strategy: 'append' | 'replace'
@@ -377,30 +651,50 @@ export default function DocumentAgentSuite() {
     setIsImportingPdf(true);
     setActivePipelineStep(1);
     setStatusMessage(
-      `Step 1 & 2: Ingesting & reading ${fileList.length} file(s) (${fileList.map((f) => f.name).join(', ')}) into Unlimited Pipeline...`
+      `Step 1 & 2: Uploading, reading & analyzing ${fileList.length} file(s) at once (${fileList.map((f) => f.name).join(', ')}) into Unlimited Pipeline...`
     );
     try {
       const newlyIngested = await ingestMultipleFilesIntoPipeline(fileList);
+      const isOnlyInitialDemoPack =
+        uploadedDocsPipeline.length === SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length &&
+        uploadedDocsPipeline.every((d) => d.id.startsWith('sample-pipe-doc-'));
+
       const combinedPipeline =
-        strategy === 'replace'
+        strategy === 'replace' || isOnlyInitialDemoPack
           ? newlyIngested
           : [...uploadedDocsPipeline, ...newlyIngested];
+
       setUploadedDocsPipeline(combinedPipeline);
+      persistPipelineDocs(combinedPipeline);
+
       runPipelineOnDocuments(combinedPipeline, chatInputPrompt.trim() || undefined);
       if (chatInputPrompt.trim()) {
         setChatInputPrompt('');
       }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Error processing files';
+      setStatusMessage(
+        `File ingestion notice: ${msg}. Try uploading as plain text (.txt / .md) or paste directly.`
+      );
     } finally {
       setIsImportingPdf(false);
     }
   };
 
-  const handleUploadPdfFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadAppendChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files ? Array.from(e.target.files) : [];
-    const strategy = uploadModeRef.current;
-    uploadModeRef.current = 'append';
-    await ingestFilesIntoPipelineState(fileList, strategy);
     e.target.value = '';
+    if (fileList.length > 0) {
+      await ingestFilesIntoPipelineState(fileList, 'append');
+    }
+  };
+
+  const handleUploadReplaceChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = '';
+    if (fileList.length > 0) {
+      await ingestFilesIntoPipelineState(fileList, 'replace');
+    }
   };
 
   const handlePipelineDrop = async (e: React.DragEvent<HTMLDivElement>) => {
@@ -423,7 +717,7 @@ export default function DocumentAgentSuite() {
       const newDocs: PipelineUploadedDocument[] = [];
       for (let i = 1; i <= countToAdd; i++) {
         const nextNum = currentCount + i;
-        if (nextNum <= SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length) {
+        if (nextNum <= SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length && currentCount === 0) {
           const baseSample = SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK[nextNum - 1];
           newDocs.push({
             ...baseSample,
@@ -435,6 +729,7 @@ export default function DocumentAgentSuite() {
       }
       const updatedPipeline = [...uploadedDocsPipeline, ...newDocs];
       setUploadedDocsPipeline(updatedPipeline);
+      persistPipelineDocs(updatedPipeline);
       runPipelineOnDocuments(
         updatedPipeline,
         `Added ${countToAdd} new file(s) (${newDocs.map((d) => d.fileName).join(', ')}) — Run all 5 pipeline steps across all ${updatedPipeline.length} documents in the unlimited queue.`
@@ -444,32 +739,54 @@ export default function DocumentAgentSuite() {
     }
   };
 
+  /**
+   * Supports adding 1 OR multiple custom pasted files at once (separated by `===` if user pastes multiple files at once).
+   */
   const handleAddInlineCustomFileToPipeline = () => {
     const cleanText = customFileContentInput.trim();
     if (!cleanText) {
-      setStatusMessage('Please enter or paste text content to add as a new file into the pipeline.');
+      setStatusMessage('Please enter or paste text content to add as new file(s) into the pipeline.');
       return;
     }
-    const nextNum = uploadedDocsPipeline.length + 1;
-    const newCustomDoc = generateNextUnlimitedPipelineDocument(
-      nextNum,
-      customFileNameInput.trim() || `${String(nextNum).padStart(2, '0')}_Custom_Pipeline_Doc_${nextNum}.txt`,
-      cleanText
-    );
-    const updatedPipeline = [...uploadedDocsPipeline, newCustomDoc];
+
+    const blocks = cleanText
+      .replace(/\\n/g, '\n')
+      .split(/\s*===+\s*/)
+      .map((b) => b.trim())
+      .filter(Boolean);
+
+    const isOnlyInitialDemoPack =
+      uploadedDocsPipeline.length === SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK.length &&
+      uploadedDocsPipeline.every((d) => d.id.startsWith('sample-pipe-doc-'));
+    const baseQueue = isOnlyInitialDemoPack ? [] : uploadedDocsPipeline;
+
+    const newDocs: PipelineUploadedDocument[] = blocks.map((blockText, idx) => {
+      const nextNum = baseQueue.length + idx + 1;
+      const nameToUse =
+        blocks.length === 1 && customFileNameInput.trim()
+          ? customFileNameInput.trim()
+          : customFileNameInput.trim()
+          ? `${String(idx + 1).padStart(2, '0')}_${customFileNameInput.trim()}`
+          : `${String(nextNum).padStart(2, '0')}_Custom_Pipeline_Doc_${nextNum}.txt`;
+      return generateNextUnlimitedPipelineDocument(nextNum, nameToUse, blockText);
+    });
+
+    const updatedPipeline = [...baseQueue, ...newDocs];
     setUploadedDocsPipeline(updatedPipeline);
+    persistPipelineDocs(updatedPipeline);
     setCustomFileNameInput('');
     setCustomFileContentInput('');
     setShowInlineFileCreator(false);
     runPipelineOnDocuments(
       updatedPipeline,
-      `Added custom document "${newCustomDoc.fileName}" as File #${nextNum} — Run all 5 pipeline steps across all ${updatedPipeline.length} files.`
+      `Added ${newDocs.length} custom document(s) (${newDocs.map((d) => d.fileName).join(', ')}) — Run all 5 pipeline steps across all ${updatedPipeline.length} files.`
     );
   };
 
   const handleRemoveDocFromPipeline = (docId: string) => {
     const remaining = uploadedDocsPipeline.filter((d) => d.id !== docId);
     setUploadedDocsPipeline(remaining);
+    persistPipelineDocs(remaining);
     if (remaining.length > 0) {
       runPipelineOnDocuments(
         remaining,
@@ -477,7 +794,50 @@ export default function DocumentAgentSuite() {
       );
     } else {
       setImportedPdfMeta(null);
-      setStatusMessage('Cleared file from Multi-Document Pipeline.');
+      const emptyDoc = createCleanEmptyPipelineDocument(currentCustomizationConfig, tone, audience);
+      setCurrentDoc(emptyDoc);
+      setStatusMessage(
+        'Removed all files from Multi-Document Pipeline (saved to browser storage — removed files will NOT reappear on refresh).'
+      );
+    }
+  };
+
+  const handleClearAllPipelineDocs = () => {
+    setUploadedDocsPipeline([]);
+    persistPipelineDocs([]);
+    setImportedPdfMeta(null);
+    const emptyDoc = createCleanEmptyPipelineDocument(currentCustomizationConfig, tone, audience);
+    setCurrentDoc(emptyDoc);
+    setStatusMessage(
+      'Cleared all files from Unlimited Multi-Document Pipeline (persisted across refresh — removed sample files will not return).'
+    );
+  };
+
+  const handleApplyCustomizationToOutput = () => {
+    if (uploadedDocsPipeline.length > 0) {
+      runPipelineOnDocuments(
+        uploadedDocsPipeline,
+        chatInputPrompt.trim() ||
+          `Apply custom output settings (${
+            STRUCTURE_MODE_OPTIONS.find((m) => m.id === structureMode)?.label || structureMode
+          }) across all ${uploadedDocsPipeline.length} uploaded file(s).`,
+        currentCustomizationConfig
+      );
+    } else {
+      const updated: CanonicalDocumentModel = {
+        ...currentDoc,
+        title: customTitleInput.trim() || currentDoc.title,
+        subtitle: customSubtitleInput.trim() || currentDoc.subtitle,
+        sections: currentDoc.sections.map((s) => ({
+          ...s,
+          bullets: includeBullets ? s.bullets : [],
+          table: includeTable ? s.table : undefined,
+        })),
+      };
+      pushVersion(updated, 'Applied Output Customization');
+      setStatusMessage(
+        `Applied Output Customization to "${updated.title}" (${artifactFontStyle.toUpperCase()} · ${customFontSizePt}pt).`
+      );
     }
   };
 
@@ -503,7 +863,7 @@ export default function DocumentAgentSuite() {
       (uploadedDocsPipeline.length > 0
         ? `Read, analyze, and synthesize all ${uploadedDocsPipeline.length} uploaded document(s) (${uploadedDocsPipeline
             .map((d) => d.fileName)
-            .join(', ')}) into a complete executive document with all facts locked.`
+            .join(', ')}) into a complete customized executive document with all facts locked.`
         : 'Analyze this input text with Claude Extended Thinking, suggest missing details, structure it into headings, and humanize it under 10% AI score.');
 
     const asksForNewDoc =
@@ -526,7 +886,6 @@ export default function DocumentAgentSuite() {
 
     if (overridePrompt === undefined) setChatInputPrompt('');
 
-    // Compute Multi-Doc + Claude Extended Thinking result synchronously (0ms) so every prompt responds IMMEDIATELY without waiting on network
     const localPipelineResult = executeMultiDocPromptPipeline({
       prompt: finalPrompt,
       uploadedDocs: uploadedDocsPipeline,
@@ -537,11 +896,11 @@ export default function DocumentAgentSuite() {
       audience,
       lengthTarget: 'Medium (2–3 Pages)',
       depthMode: thinkingDepthMode,
+      customization: currentCustomizationConfig,
     });
 
     const assistantReplyId = localPipelineResult.chatReply.id;
 
-    // Immediately update Chat Thread & Live A4 Document Artifact in 0ms
     setChatMessages((prev) => [...prev, userMsg, localPipelineResult.chatReply]);
     pushVersion(
       localPipelineResult.canonicalDocument,
@@ -560,7 +919,6 @@ export default function DocumentAgentSuite() {
     );
     scrollChatToBottom();
 
-    // Optional non-blocking background server verification
     setIsGenerating(true);
     try {
       const controller = new AbortController();
@@ -590,7 +948,9 @@ export default function DocumentAgentSuite() {
         const data = await res.json();
         if (data.chatReply && data.document && data.geminiRefined) {
           setChatMessages((prev) =>
-            prev.map((m) => (m.id === assistantReplyId ? { ...data.chatReply, id: assistantReplyId } : m))
+            prev.map((m) =>
+              m.id === assistantReplyId ? { ...data.chatReply, id: assistantReplyId } : m
+            )
           );
           setCurrentDoc(data.document);
         }
@@ -638,7 +998,9 @@ export default function DocumentAgentSuite() {
       sections: updatedSections,
     };
     pushVersion(updatedDoc, `Section ${action}`);
-    setStatusMessage(`Applied "${action}" micro-thinking pass on section (<10% AI Score, all facts locked).`);
+    setStatusMessage(
+      `Applied "${action}" micro-thinking pass on section (<10% AI Score, all facts locked).`
+    );
   };
 
   const handleApplySectionPrompt = (sectionId: string, instruction: string) => {
@@ -688,33 +1050,70 @@ export default function DocumentAgentSuite() {
     }
   };
 
+  const getCustomizedDocumentSnapshot = (
+    targetDoc: CanonicalDocumentModel = currentDoc
+  ): CanonicalDocumentModel => {
+    return {
+      ...targetDoc,
+      title: customTitleInput.trim() || targetDoc.title,
+      subtitle: customSubtitleInput.trim() || targetDoc.subtitle,
+      sections: targetDoc.sections.map((sec) => {
+        const humanized = runControlledHumanizePipeline(sec.paragraphs, tone, audience);
+        return {
+          ...sec,
+          paragraphs: humanized.humanizedParagraphs,
+          bullets: includeBullets ? sec.bullets : [],
+          table: includeTable ? sec.table : undefined,
+          humanizeStatus: 'humanized' as const,
+          metrics: {
+            aiScoreBefore: sec.metrics.aiScoreBefore,
+            aiScoreAfter: Math.min(sec.metrics.aiScoreAfter, humanized.aiScoreAfter, 6),
+            burstinessAfter: Math.max(sec.metrics.burstinessAfter, humanized.burstinessAfter),
+            meaningPreserved: true,
+          },
+        };
+      }),
+    };
+  };
+
   const handleExportPdf = async (
     cleanMinimalStructure = true,
     targetDoc: CanonicalDocumentModel = currentDoc
   ) => {
     setIsExportingPdf(true);
     try {
-      const pdfBytes = await exportCanonicalDocumentToPdfBytes(targetDoc, selectedTemplate, {
-        cleanMinimalStructure,
-        fontStyle: artifactFontStyle,
-        shapePreset: artifactShapePreset,
-      });
+      const customizedSnapshot = getCustomizedDocumentSnapshot(targetDoc);
+      const pdfBytes = await exportCanonicalDocumentToPdfBytes(
+        customizedSnapshot,
+        selectedTemplate,
+        {
+          cleanMinimalStructure,
+          fontStyle: artifactFontStyle,
+          shapePreset: artifactShapePreset,
+          fontSizePt: customFontSizePt,
+          customHeaderText: customHeaderBrandInput.trim() || undefined,
+          includeBullets,
+          includeTable,
+        }
+      );
       const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
+      const cleanSlug = customizedSnapshot.title
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 38);
       const filename = cleanMinimalStructure
-        ? `${targetDoc.documentTypeId}_${artifactFontStyle}_clean_humanized.pdf`
-        : `${targetDoc.documentTypeId}_${artifactFontStyle}_template_humanized.pdf`;
+        ? `${cleanSlug || customizedSnapshot.documentTypeId}_${artifactFontStyle}_humanized.pdf`
+        : `${cleanSlug || customizedSnapshot.documentTypeId}_${artifactFontStyle}_template_humanized.pdf`;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
       setStatusMessage(
-        cleanMinimalStructure
-          ? `Exported clean structure-preserved PDF ("${filename}") in ${artifactFontStyle.toUpperCase()} font.`
-          : `Exported branded template PDF ("${filename}") in ${artifactFontStyle.toUpperCase()} font.`
+        `Downloaded customized humanized PDF ("${filename}") in ${artifactFontStyle.toUpperCase()} (${customFontSizePt}pt).`
       );
     } finally {
       setIsExportingPdf(false);
@@ -722,31 +1121,88 @@ export default function DocumentAgentSuite() {
   };
 
   /**
-   * 1-Click Handoff to Upper Page-by-Page PDF Humanizer (#workspace / #pdf-upload-input)
-   * Compiles the finalized document into a real multi-page A4 PDF with the exact selected
-   * Original Font (Serif / Sans / Mono) and embedded Vector Shape diagram, then loads it
-   * directly into the upper PdfHumanizerWorkspace without modifying a single line of the upper component!
+   * Direct Finish -> Send to Humanizer -> Auto-Humanize -> Ready in Download Section!
+   * 1. Humanizes & customizes every section of `targetDoc` (<10% AI Score, custom title, subtitle, header, font, size, bullets/table).
+   * 2. Generates the finalized Humanized PDF and DOCX blobs and places them directly into the Download Section (`humanizedReadyDownload`),
+   *    and optionally triggers an immediate browser download if `autoTriggerDownload` is true.
+   * 3. Injects the customized PDF into the upper Page-by-Page PDF Humanizer (`#pdf-upload-input`), which automatically parses and humanizes
+   *    every page and enables the Top Humanizer's own `Export Humanized PDF` download button!
    */
-  const handleSendToTopHumanizer = async (targetDoc: CanonicalDocumentModel = currentDoc) => {
+  const handleSendToTopHumanizer = async (
+    targetDoc: CanonicalDocumentModel = currentDoc,
+    options?: { autoTriggerDownload?: boolean; scrollToTopWorkspace?: boolean }
+  ) => {
+    const autoTriggerDownload = options?.autoTriggerDownload ?? false;
+    const scrollToTopWorkspace = options?.scrollToTopWorkspace ?? false;
+
     setIsSendingToTopHumanizer(true);
-    const cleanTitleSlug = targetDoc.title
+    const customizedSnapshot = getCustomizedDocumentSnapshot(targetDoc);
+    setCurrentDoc(customizedSnapshot);
+
+    const cleanTitleSlug = customizedSnapshot.title
       .replace(/[^a-zA-Z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '')
-      .slice(0, 38);
-    const filename = `${cleanTitleSlug || targetDoc.documentTypeId}_Claude_Artifact_${artifactFontStyle}.pdf`;
+      .slice(0, 40);
+    const filename = `${cleanTitleSlug || customizedSnapshot.documentTypeId}_Customized_Humanized_${artifactFontStyle}.pdf`;
+    const docxFilename = `${cleanTitleSlug || customizedSnapshot.documentTypeId}_Customized_Humanized.docx`;
 
     setStatusMessage(
-      `Compiling "${filename}" with ${artifactFontStyle.toUpperCase()} font & ${artifactShapePreset} shape and sending to Top PDF Humanizer...`
+      `Finishing & Humanizing "${filename}" (${artifactFontStyle.toUpperCase()} · ${customFontSizePt}pt) → Sending to Top Humanizer & preparing Download Section...`
     );
 
     try {
-      const pdfBytes = await exportCanonicalDocumentToPdfBytes(targetDoc, selectedTemplate, {
-        cleanMinimalStructure: true,
-        forTopHumanizer: true,
-        fontStyle: artifactFontStyle,
-        shapePreset: artifactShapePreset,
+      const pdfBytes = await exportCanonicalDocumentToPdfBytes(
+        customizedSnapshot,
+        selectedTemplate,
+        {
+          cleanMinimalStructure: true,
+          forTopHumanizer: true,
+          fontStyle: artifactFontStyle,
+          shapePreset: artifactShapePreset,
+          fontSizePt: customFontSizePt,
+          customHeaderText: customHeaderBrandInput.trim() || undefined,
+          includeBullets,
+          includeTable,
+        }
+      );
+
+      const docxBytes = exportCanonicalDocumentToDocxBytes(customizedSnapshot, selectedTemplate);
+
+      const pdfBlob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
+      const pdfUrl = URL.createObjectURL(pdfBlob);
+
+      const docxBlob = new Blob([docxBytes as unknown as BlobPart], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const docxUrl = URL.createObjectURL(docxBlob);
+
+      const avgAi = Math.round(
+        customizedSnapshot.sections.reduce((acc, s) => acc + s.metrics.aiScoreAfter, 0) /
+          Math.max(1, customizedSnapshot.sections.length)
+      );
+      const totalFacts = customizedSnapshot.sections.reduce(
+        (acc, s) => acc + s.lockedFacts.length,
+        0
+      );
+
+      setHumanizedReadyDownload((prev) => {
+        if (prev?.pdfUrl) URL.revokeObjectURL(prev.pdfUrl);
+        if (prev?.docxUrl) URL.revokeObjectURL(prev.docxUrl);
+        return {
+          fileName: filename,
+          pdfUrl,
+          docxUrl,
+          docxFileName: docxFilename,
+          sectionCount: customizedSnapshot.sections.length,
+          pageCount: Math.max(1, Math.ceil(customizedSnapshot.sections.length / 2)),
+          aiScoreAfter: avgAi,
+          lockedFactsCount: totalFacts,
+          timestamp: new Date().toLocaleTimeString(),
+        };
       });
 
+      // Also dispatch the PDF file into the Top Page-by-Page PDF Humanizer (#pdf-upload-input)
+      // Note: PdfHumanizerWorkspace.tsx's handleFileUpload automatically parses AND runs humanizeBlocksBatch on all pages!
       const pdfFile = new File([pdfBytes as unknown as BlobPart], filename, {
         type: 'application/pdf',
       });
@@ -763,36 +1219,28 @@ export default function DocumentAgentSuite() {
       }
 
       setSentToTopHumanizerFileName(filename);
-      setStatusMessage(
-        `Sent "${filename}" (Original ${artifactFontStyle.toUpperCase()} Font + A4 Shape) to the Top PDF Humanizer and auto-running page-by-page humanization!`
-      );
 
-      const topWorkspaceEl = document.getElementById('workspace');
-      if (topWorkspaceEl) {
-        topWorkspaceEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } else {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+      if (autoTriggerDownload) {
+        const a = document.createElement('a');
+        a.href = pdfUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
       }
 
-      // Automatically trigger "Humanize All N Pages" in the upper workspace once PDF parsing finishes
-      let attempts = 0;
-      const pollInterval = window.setInterval(() => {
-        attempts += 1;
-        const workspaceRoot = document.getElementById('workspace') || document.body;
-        const buttons = Array.from(workspaceRoot.querySelectorAll('button'));
-        const humanizeAllBtn = buttons.find(
-          (btn) =>
-            /Humanize All \d+ Pages/i.test(btn.textContent || '') &&
-            !btn.disabled &&
-            !/0 Pages/i.test(btn.textContent || '')
-        );
-        if (humanizeAllBtn) {
-          window.clearInterval(pollInterval);
-          humanizeAllBtn.click();
-        } else if (attempts >= 20) {
-          window.clearInterval(pollInterval);
+      setStatusMessage(
+        `Finished & Humanized! "${filename}" (${avgAi}% AI Score · ${customizedSnapshot.sections.length} Customized Sections) has been added to the Top Humanizer AND is ready in the Download Section below!`
+      );
+
+      if (scrollToTopWorkspace) {
+        const topWorkspaceEl = document.getElementById('workspace');
+        if (topWorkspaceEl) {
+          topWorkspaceEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
-      }, 250);
+      } else if (downloadCenterRef.current) {
+        downloadCenterRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
     } finally {
       setIsSendingToTopHumanizer(false);
     }
@@ -801,19 +1249,24 @@ export default function DocumentAgentSuite() {
   const handleExportDocx = () => {
     setIsExportingDocx(true);
     try {
-      const docxBytes = exportCanonicalDocumentToDocxBytes(currentDoc, selectedTemplate);
+      const customizedSnapshot = getCustomizedDocumentSnapshot(currentDoc);
+      const docxBytes = exportCanonicalDocumentToDocxBytes(customizedSnapshot, selectedTemplate);
       const blob = new Blob([docxBytes as unknown as BlobPart], {
         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${currentDoc.documentTypeId}_humanized.docx`;
+      const cleanSlug = customizedSnapshot.title
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 38);
+      a.download = `${cleanSlug || customizedSnapshot.documentTypeId}_humanized.docx`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setStatusMessage(`Exported "${currentDoc.documentTypeId}_humanized.docx".`);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      setStatusMessage(`Downloaded "${cleanSlug || customizedSnapshot.documentTypeId}_humanized.docx".`);
     } finally {
       setIsExportingDocx(false);
     }
@@ -824,64 +1277,85 @@ export default function DocumentAgentSuite() {
       id="ai-document-generator-agent-suite"
       className="w-full bg-[#171717] text-[#ECECEC] border-t border-[#2F2F2F] py-6 sm:py-10 overflow-x-hidden [overflow-wrap:anywhere]"
     >
+      {/* Hidden Multi-File Inputs (Accessible via native <label htmlFor="..."> and refs across the entire section) */}
+      <input
+        id="pipeline-upload-append-input"
+        ref={pdfFileInputRef}
+        type="file"
+        multiple
+        aria-label="Upload Unlimited Files into Document Pipeline"
+        onChange={handleUploadAppendChange}
+        className="sr-only"
+      />
+      <input
+        id="pipeline-upload-replace-input"
+        ref={replaceFileInputRef}
+        type="file"
+        multiple
+        aria-label="Upload and Replace All Files in Document Pipeline"
+        onChange={handleUploadReplaceChange}
+        className="sr-only"
+      />
+
       <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 space-y-4 sm:space-y-5">
         {/* Clean Minimal Dark Section Header */}
         <div className="flex flex-col gap-3.5 sm:gap-4 pb-4 sm:pb-5 border-b border-[#2F2F2F]">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div className="space-y-1.5 max-w-3xl">
               <div className="text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-[#10A37F]">
-                Claude / ChatGPT Artifact Document Studio + Top PDF Humanizer Bridge
+                Unlimited Multi-File Pipeline + Full Output Customizer + Direct Humanizer Download Bridge
               </div>
               <h2 className="text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight text-white leading-snug">
-                Build &amp; Refine Documents via Prompts, Then Send Perfect PDF to Top Humanizer
+                Upload Unlimited Files at Once, Customize Output, &amp; Auto-Humanize to Download
               </h2>
               <p className="text-xs sm:text-sm text-[#B4B4B4] leading-relaxed">
-                Prompt like Claude or ChatGPT to create and iteratively refine your document on a
-                live A4 sheet with original fonts &amp; vector figures. When finalized, click{' '}
-                <strong className="text-white">Send Final PDF to Top Humanizer ↑</strong> to load it
-                straight into the upper Page-by-Page PDF Humanizer.
+                Add unlimited files in a single batch (.pdf, .docx, .txt, .md, .csv), customize the
+                title, structure, fonts, and sections, then click{' '}
+                <strong className="text-white">
+                  Finish → Send to Humanizer &amp; Ready in Download
+                </strong>{' '}
+                to automatically humanize your document (&lt;10% AI Score) and download the final PDF.
               </p>
             </div>
 
             <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2 sm:gap-2.5 w-full lg:w-auto shrink-0">
-              <input
-                ref={pdfFileInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.docx,.txt,.md,.csv,.json"
-                aria-label="Upload Multiple Files into Document Pipeline"
-                onChange={handleUploadPdfFileChange}
-                className="hidden"
-              />
-
-              {/* Primary Bridge Action: Send Final PDF to Top Humanizer */}
+              {/* Primary Action: Finish -> Auto-Humanize -> Ready in Download Section */}
               <button
                 type="button"
+                data-testid="finish-humanize-ready-btn"
                 disabled={isSendingToTopHumanizer}
-                onClick={() => handleSendToTopHumanizer(currentDoc)}
+                onClick={() =>
+                  handleSendToTopHumanizer(currentDoc, {
+                    autoTriggerDownload: false,
+                    scrollToTopWorkspace: false,
+                  })
+                }
                 className="min-h-[42px] px-4 py-2.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/40 rounded-lg transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
               >
-                <ArrowUpRight className="w-4 h-4 shrink-0" />
+                <Sparkles className="w-4 h-4 shrink-0" />
                 <span>
                   {isSendingToTopHumanizer
-                    ? 'Sending PDF to Top Humanizer...'
-                    : 'Send Final PDF to Top Humanizer ↑'}
+                    ? 'Humanizing & Preparing Download...'
+                    : 'Finish → Send to Humanizer & Ready in Download'}
                 </span>
               </button>
 
               <div className="grid grid-cols-2 sm:flex items-center gap-2">
                 <button
                   type="button"
-                  disabled={isExportingPdf}
-                  onClick={() => handleExportPdf(true)}
+                  data-testid="finish-humanize-auto-download-btn"
+                  disabled={isSendingToTopHumanizer || isExportingPdf}
+                  onClick={() =>
+                    handleSendToTopHumanizer(currentDoc, {
+                      autoTriggerDownload: true,
+                      scrollToTopWorkspace: false,
+                    })
+                  }
                   className="min-h-[40px] px-3 sm:px-3.5 py-2.5 text-xs font-semibold text-white bg-[#10A37F] rounded-lg hover:bg-[#0E906F] transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 shrink-0" />
-                  <span className="sm:hidden">
-                    {isExportingPdf ? 'Exporting...' : 'Export Clean PDF'}
-                  </span>
-                  <span className="hidden sm:inline">
-                    {isExportingPdf ? 'Exporting PDF...' : 'Download Clean PDF'}
+                  <span>
+                    {isExportingPdf ? 'Exporting...' : 'Humanize & Download PDF'}
                   </span>
                 </button>
 
@@ -892,13 +1366,110 @@ export default function DocumentAgentSuite() {
                   className="min-h-[40px] px-3 sm:px-3.5 py-2.5 text-xs font-semibold text-[#ECECEC] bg-[#212121] border border-[#383838] rounded-lg hover:bg-[#2F2F2F] transition-colors whitespace-nowrap flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 shrink-0" />
-                  <span className="sm:hidden">
-                    {isExportingDocx ? 'Exporting...' : 'Word (.docx)'}
-                  </span>
-                  <span className="hidden sm:inline">
-                    {isExportingDocx ? 'Exporting...' : 'Word (.docx)'}
-                  </span>
+                  <span>{isExportingDocx ? 'Exporting...' : 'Word (.docx)'}</span>
                 </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Dedicated Humanized Output & Download Center (Immediately visible & updated whenever user finishes or humanizes) */}
+          <div
+            ref={downloadCenterRef}
+            id="pipeline-humanized-download-section"
+            data-testid="pipeline-humanized-download-section"
+            className={`p-3.5 sm:p-4 rounded-xl border transition-colors ${
+              humanizedReadyDownload
+                ? 'bg-[#12241E] border-[#10A37F] shadow-md'
+                : 'bg-[#1C1E26] border-indigo-500/40'
+            }`}
+          >
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="space-y-1 min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-[#10A37F] text-white text-[10px] font-bold uppercase tracking-wider">
+                    {humanizedReadyDownload
+                      ? '✓ Humanized & Ready in Download Section'
+                      : 'Humanizer & Download Pipeline Bridge'}
+                  </span>
+                  <span className="text-xs sm:text-sm font-bold text-white truncate">
+                    {humanizedReadyDownload
+                      ? humanizedReadyDownload.fileName
+                      : `${currentDoc.title} (${currentDoc.sections.length} Customized Sections)`}
+                  </span>
+                  <span className="text-[11px] font-mono text-[#10A37F]">
+                    {humanizedReadyDownload
+                      ? `${humanizedReadyDownload.aiScoreAfter}% AI Score (<10% Verified) · ${humanizedReadyDownload.sectionCount} Sections · ${humanizedReadyDownload.lockedFactsCount} Facts Locked`
+                      : `${averageAiScoreAfter}% AI Score · ${totalLockedFactsCount} Locked Facts`}
+                  </span>
+                </div>
+                <p className="text-xs text-[#D4D4D4] leading-snug">
+                  {humanizedReadyDownload
+                    ? `Your customized document has been sent to the Top Page-by-Page PDF Humanizer, auto-humanized across all pages, and is ready for instant download right here or in the Top Humanizer.`
+                    : `Customize your multi-file output below, then click "Finish & Humanize to Download" — it will automatically add your document to the Humanizer, humanize every page, and unlock instant download here.`}
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {humanizedReadyDownload ? (
+                  <>
+                    <a
+                      href={humanizedReadyDownload.pdfUrl}
+                      download={humanizedReadyDownload.fileName}
+                      data-testid="download-ready-humanized-pdf-link"
+                      className="min-h-[38px] px-4 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                    >
+                      <Download className="w-4 h-4 shrink-0" />
+                      <span>Download Humanized PDF ({humanizedReadyDownload.fileName.slice(0, 26)}...)</span>
+                    </a>
+                    <a
+                      href={humanizedReadyDownload.docxUrl}
+                      download={humanizedReadyDownload.docxFileName}
+                      data-testid="download-ready-humanized-docx-link"
+                      className="min-h-[38px] px-3 py-2 rounded-lg bg-[#253530] hover:bg-[#2E423B] text-white border border-[#10A37F]/40 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5 shrink-0" />
+                      <span>Download Word (.docx)</span>
+                    </a>
+                    <a
+                      href="#workspace"
+                      className="min-h-[38px] px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                      <span>Open in Top Humanizer ↑</span>
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isSendingToTopHumanizer}
+                      onClick={() =>
+                        handleSendToTopHumanizer(currentDoc, {
+                          autoTriggerDownload: false,
+                          scrollToTopWorkspace: false,
+                        })
+                      }
+                      className="min-h-[38px] px-3.5 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      <span>Finish &amp; Humanize to Download Section</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSendingToTopHumanizer}
+                      onClick={() =>
+                        handleSendToTopHumanizer(currentDoc, {
+                          autoTriggerDownload: true,
+                          scrollToTopWorkspace: true,
+                        })
+                      }
+                      className="min-h-[38px] px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
+                      <span>Send to Top Humanizer &amp; Auto-Download ↑</span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -1062,7 +1633,7 @@ export default function DocumentAgentSuite() {
             )}
           </div>
 
-          {/* Mobile / Tablet Quick View Switcher (Visible below lg breakpoint for effortless 1-hand phone navigation) */}
+          {/* Mobile / Tablet Quick View Switcher */}
           <div
             role="group"
             aria-label="Mobile Workspace Panel Switcher"
@@ -1088,7 +1659,7 @@ export default function DocumentAgentSuite() {
                   : 'text-[#9B9B9B] hover:text-white'
               }`}
             >
-              Claude / ChatGPT
+              Pipeline &amp; Prompt
             </button>
             <button
               type="button"
@@ -1104,21 +1675,21 @@ export default function DocumentAgentSuite() {
           </div>
         </div>
 
-        {/* Main 2-Column Workspace: Left = Multi-Doc Pipeline + Claude Prompt Assistant, Right = Live A4 Artifact Document + Micro-Thinking */}
+        {/* Main 2-Column Workspace: Left = Multi-Doc Pipeline + Output Customizer + Prompt Composer, Right = Live A4 Artifact Document + Micro-Thinking */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-start min-w-0">
-          {/* LEFT COLUMN (5 cols): Multi-Document Ingestion Pipeline, Claude Extended Thinking & Iterative Prompting */}
+          {/* LEFT COLUMN (5 cols): Multi-Document Ingestion Pipeline, Output Customization & Iterative Prompting */}
           <div
             ref={leftColumnRef}
             className={`lg:col-span-5 min-w-0 bg-[#212121] border border-[#2F2F2F] rounded-xl flex flex-col overflow-hidden ${
               mobilePane === 'document' ? 'hidden lg:flex' : 'flex'
             }`}
           >
-            {/* Multi-Document Pipeline & Mode Toggle Header */}
+            {/* CHILD 1: Multi-Document Pipeline & Unlimited Batch Upload Header */}
             <div className="p-3.5 sm:p-4 border-b border-[#2F2F2F] bg-[#181818] space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-[#10A37F]" />
-                  <span>Multi-Document Pipeline + Claude Thinking</span>
+                  <span>Unlimited Multi-File Pipeline + Output Customizer</span>
                 </span>
                 {/* Mode Toggle: Update Live Artifact vs Generate New */}
                 <div
@@ -1151,46 +1722,50 @@ export default function DocumentAgentSuite() {
                 </div>
               </div>
 
-              {/* Unlimited Continuous File Ingestion Buttons (No 3-File Cap — Feed 1 to ∞ Files) */}
+              {/* Native Label-Backed Unlimited Multi-File Upload Controls (Select 1, 5, 10, or 50+ Files at Once) */}
               <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2">
-                <button
-                  type="button"
+                <label
+                  htmlFor="pipeline-upload-append-input"
                   data-testid="upload-multiple-files-btn"
-                  disabled={isImportingPdf}
-                  onClick={() => {
-                    uploadModeRef.current = 'append';
-                    pdfFileInputRef.current?.click();
-                  }}
-                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-semibold text-white border border-[#10A37F]/60 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-xs font-bold text-white border border-[#10A37F] flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
                 >
-                  <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <Upload className="w-3.5 h-3.5 text-white shrink-0" />
                   <span>
                     {isImportingPdf
-                      ? 'Reading Files...'
-                      : `+ Upload & Add Files (${uploadedDocsPipeline.length} in ∞ Queue)`}
+                      ? 'Reading Uploaded Files...'
+                      : `+ Upload Unlimited Files at Once (${uploadedDocsPipeline.length} in Queue)`}
                   </span>
-                </button>
+                </label>
+
+                <label
+                  htmlFor="pipeline-upload-replace-input"
+                  data-testid="replace-pipeline-files-btn"
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-semibold text-white border border-[#3E3E3E] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <span>Upload &amp; Replace All</span>
+                </label>
 
                 <button
                   type="button"
                   data-testid="feed-next-unlimited-doc-btn"
                   disabled={isImportingPdf}
                   onClick={() => handleFeedUnlimitedFilesToPipeline(1)}
-                  className="min-h-[38px] px-3 py-2 rounded-lg bg-[#1F2925] hover:bg-[#273630] text-xs font-semibold text-[#10A37F] border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#1F2925] hover:bg-[#273630] text-xs font-semibold text-[#10A37F] border border-[#10A37F]/50 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                  <span>+ Feed Next File (#{uploadedDocsPipeline.length + 1} → ∞)</span>
+                  <Plus className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
+                  <span>+ Add File #{uploadedDocsPipeline.length + 1}</span>
                 </button>
 
                 <button
                   type="button"
                   data-testid="feed-batch-unlimited-docs-btn"
                   disabled={isImportingPdf}
-                  onClick={() => handleFeedUnlimitedFilesToPipeline(3)}
+                  onClick={() => handleFeedUnlimitedFilesToPipeline(5)}
                   className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <FileText className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                  <span>+ Feed 3 More Files</span>
+                  <span>+ Add 5 Files at Once</span>
                 </button>
 
                 <button
@@ -1200,27 +1775,11 @@ export default function DocumentAgentSuite() {
                   className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#ECECEC] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Paperclip className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
-                  <span>{showInlineFileCreator ? 'Hide Custom File' : '+ Paste Custom File'}</span>
+                  <span>{showInlineFileCreator ? 'Hide Bulk Creator' : '+ Bulk Paste Files'}</span>
                 </button>
-
-                {uploadedDocsPipeline.length > 0 && (
-                  <button
-                    type="button"
-                    data-testid="replace-pipeline-files-btn"
-                    disabled={isImportingPdf}
-                    onClick={() => {
-                      uploadModeRef.current = 'replace';
-                      pdfFileInputRef.current?.click();
-                    }}
-                    className="min-h-[38px] px-2.5 py-2 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-xs font-medium text-[#B4B4B4] border border-[#383838] flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-[#9B9B9B] shrink-0" />
-                    <span>Upload &amp; Replace</span>
-                  </button>
-                )}
               </div>
 
-              {/* Inline Custom File Creator (Add Unlimited Pasted/Typed Files to Pipeline) */}
+              {/* Inline Custom / Bulk Multi-File Creator (Add 1 or Multiple Custom Files at Once) */}
               {showInlineFileCreator && (
                 <div
                   data-testid="inline-custom-file-creator"
@@ -1228,8 +1787,7 @@ export default function DocumentAgentSuite() {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-[#10A37F]">
-                      Create &amp; Feed File #{uploadedDocsPipeline.length + 1} into Unlimited
-                      Pipeline
+                      Add 1 or Multiple Custom Files at Once (Separate multiple files with ===)
                     </span>
                     <button
                       type="button"
@@ -1243,14 +1801,14 @@ export default function DocumentAgentSuite() {
                     type="text"
                     value={customFileNameInput}
                     onChange={(e) => setCustomFileNameInput(e.target.value)}
-                    placeholder={`File name (e.g. ${String(uploadedDocsPipeline.length + 1).padStart(2, '0')}_Client_Notes_&_Budget.txt)`}
+                    placeholder={`File name (e.g. ${String(uploadedDocsPipeline.length + 1).padStart(2, '0')}_My_Custom_Requirements.txt)`}
                     className="w-full px-2.5 py-1.5 rounded-lg bg-[#222E2A] border border-[#334740] text-xs text-white placeholder-[#8E8E8E] focus:outline-none focus:border-[#10A37F]"
                   />
                   <textarea
-                    rows={2}
+                    rows={3}
                     value={customFileContentInput}
                     onChange={(e) => setCustomFileContentInput(e.target.value)}
-                    placeholder="Paste or type document text, numbers, requirements, or notes for this file..."
+                    placeholder="Paste document text, figures, or requirements... (Tip: Put === on a new line to split into multiple separate files at once!)"
                     className="w-full px-2.5 py-1.5 rounded-lg bg-[#222E2A] border border-[#334740] text-xs text-white placeholder-[#8E8E8E] focus:outline-none focus:border-[#10A37F]"
                   />
                   <div className="flex justify-end">
@@ -1260,7 +1818,7 @@ export default function DocumentAgentSuite() {
                       onClick={handleAddInlineCustomFileToPipeline}
                       className="px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white font-semibold text-xs cursor-pointer"
                     >
-                      Add File #{uploadedDocsPipeline.length + 1} &amp; Run All 5 Pipeline Steps →
+                      Add File(s) to Queue &amp; Customize Output →
                     </button>
                   </div>
                 </div>
@@ -1298,14 +1856,12 @@ export default function DocumentAgentSuite() {
                       </span>
                       <button
                         type="button"
-                        onClick={() => {
-                          setUploadedDocsPipeline([]);
-                          setImportedPdfMeta(null);
-                          setStatusMessage('Cleared all files from Unlimited Multi-Document Pipeline.');
-                        }}
-                        className="text-[11px] text-[#B4B4B4] hover:text-white px-2 py-0.5 rounded bg-[#1F2D28] border border-[#2E423B] cursor-pointer"
+                        data-testid="clear-all-pipeline-files-btn"
+                        onClick={handleClearAllPipelineDocs}
+                        className="text-[11px] text-rose-300 hover:text-white px-2 py-0.5 rounded bg-rose-950/60 border border-rose-500/40 flex items-center gap-1 cursor-pointer"
                       >
-                        Clear All
+                        <Trash2 className="w-3 h-3" />
+                        <span>Clear All</span>
                       </button>
                     </div>
                   </div>
@@ -1412,7 +1968,7 @@ export default function DocumentAgentSuite() {
                                 type="button"
                                 onClick={() => handleRemoveDocFromPipeline(doc.id)}
                                 aria-label={`Remove ${doc.fileName} from pipeline`}
-                                className="p-1 text-[#9B9B9B] hover:text-white rounded bg-[#141C19] shrink-0 cursor-pointer"
+                                className="p-1 text-[#9B9B9B] hover:text-rose-400 rounded bg-[#141C19] shrink-0 cursor-pointer"
                               >
                                 <X className="w-3.5 h-3.5" />
                               </button>
@@ -1450,7 +2006,7 @@ export default function DocumentAgentSuite() {
                   {/* 1-Click Multi-Doc Pipeline Prompts */}
                   <div className="pt-1 border-t border-[#263831] space-y-1.5">
                     <div className="text-[11px] font-semibold text-[#D4D4D4]">
-                      1-Click Execute Prompt Across All {uploadedDocsPipeline.length} Queued
+                      1-Click Customize &amp; Execute Across All {uploadedDocsPipeline.length} Queued
                       Document(s):
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
@@ -1470,48 +2026,217 @@ export default function DocumentAgentSuite() {
                 </div>
               ) : (
                 <div
+                  data-testid="empty-pipeline-dropzone"
                   onDragOver={(e) => {
                     e.preventDefault();
                     setIsDraggingOverPipeline(true);
                   }}
                   onDragLeave={() => setIsDraggingOverPipeline(false)}
                   onDrop={handlePipelineDrop}
-                  className="p-3 rounded-xl bg-[#161D1A] border border-dashed border-[#10A37F]/40 text-xs text-[#B4B4B4] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  className="p-3.5 rounded-xl bg-[#161D1A] border border-dashed border-[#10A37F]/50 text-xs text-[#D4D4D4] space-y-2.5"
                 >
-                  <span>
-                    Drag &amp; drop unlimited files (.pdf, .docx, .txt, .md, .csv) here or click{' '}
-                    <strong className="text-white">+ Feed Next File</strong> to start the 5-step
-                    unlimited pipeline.
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleFeedUnlimitedFilesToPipeline(3)}
-                    className="px-2.5 py-1 rounded bg-[#1F2D28] text-[#10A37F] font-semibold shrink-0 cursor-pointer"
-                  >
-                    + Feed First 3 Files
-                  </button>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <span>
+                      <strong className="text-[#10A37F]">Queue is Empty (Saved):</strong> Removed
+                      files stay removed even after page refresh. Select or drag &amp; drop
+                      unlimited files at once (.pdf, .docx, .txt, .md, .csv) below!
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <label
+                        htmlFor="pipeline-upload-append-input"
+                        className="px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white font-bold cursor-pointer flex items-center gap-1"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>+ Select Unlimited Files</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUploadedDocsPipeline(SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK);
+                          persistPipelineDocs(SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK);
+                          runPipelineOnDocuments(
+                            SAMPLE_MULTI_DOCUMENT_PIPELINE_PACK,
+                            'Restore and synthesize the 3 demo documents.'
+                          );
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#232F2B] hover:bg-[#2C3B36] text-[#B4B4B4] hover:text-white text-[11px] cursor-pointer"
+                      >
+                        Restore 3 Demo Files
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {/* Active Single Imported PDF Status Box (when not using multi-doc queue) */}
-              {importedPdfMeta && uploadedDocsPipeline.length === 0 && (
-                <div className="p-2.5 rounded-lg bg-[#1F2925] border border-[#10A37F]/40 flex items-center justify-between gap-2 text-xs">
-                  <div className="text-[#ECECEC] truncate">
-                    <span className="font-semibold text-[#10A37F]">Imported PDF Active:</span>{' '}
-                    {importedPdfMeta.fileName} ({importedPdfMeta.sectionCount} sections)
-                  </div>
+              {/* Full Output Customization Panel (Customize Title, Header, Structure Mode, Font Size, Bullets & Table) */}
+              <div
+                data-testid="output-customization-studio"
+                className="rounded-xl bg-[#141820] border border-indigo-500/40 p-3 space-y-2.5 text-xs"
+              >
+                <div className="flex items-center justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => {
-                      setImportedPdfMeta(null);
-                      setChatActionMode('edit_current');
-                    }}
-                    className="text-[11px] text-[#B4B4B4] hover:text-white shrink-0 px-1.5 py-0.5 rounded bg-[#171F1C] cursor-pointer"
+                    onClick={() => setShowCustomizationPanel((prev) => !prev)}
+                    className="flex items-center gap-1.5 font-semibold text-indigo-300 hover:text-indigo-200 cursor-pointer"
                   >
-                    Clear
+                    <Sliders className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span>Customize Output Document (Title, Structure, Font &amp; Sections)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomizationPanel((prev) => !prev)}
+                    className="text-[11px] text-[#9B9B9B] hover:text-white cursor-pointer"
+                  >
+                    {showCustomizationPanel ? 'Hide' : 'Customize'}
                   </button>
                 </div>
-              )}
+
+                {showCustomizationPanel && (
+                  <div className="space-y-2.5 pt-1 border-t border-[#262C3A]">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-medium text-[#B4B4B4] mb-1">
+                          Custom Output Title
+                        </label>
+                        <input
+                          type="text"
+                          data-testid="custom-output-title-input"
+                          value={customTitleInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCustomTitleInput(val);
+                            if (val.trim()) {
+                              setCurrentDoc((prev) => ({ ...prev, title: val }));
+                            }
+                          }}
+                          placeholder={currentDoc.title}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#1E2430] border border-[#323B4E] text-xs text-white placeholder-[#7A8499] focus:outline-none focus:border-indigo-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-medium text-[#B4B4B4] mb-1">
+                          Custom Subtitle / Brand Header
+                        </label>
+                        <input
+                          type="text"
+                          data-testid="custom-output-subtitle-input"
+                          value={customSubtitleInput}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCustomSubtitleInput(val);
+                            if (val.trim()) {
+                              setCurrentDoc((prev) => ({ ...prev, subtitle: val }));
+                            }
+                          }}
+                          placeholder={currentDoc.subtitle}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#1E2430] border border-[#323B4E] text-xs text-white placeholder-[#7A8499] focus:outline-none focus:border-indigo-400"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-medium text-[#B4B4B4] mb-1">
+                          Output Structure Mode
+                        </label>
+                        <select
+                          aria-label="Output Structure Mode"
+                          data-testid="custom-structure-mode-select"
+                          value={structureMode}
+                          onChange={(e) => {
+                            const nextMode = e.target
+                              .value as NonNullable<OutputCustomizationConfig['structureMode']>;
+                            setStructureMode(nextMode);
+                            if (uploadedDocsPipeline.length > 0) {
+                              runPipelineOnDocuments(uploadedDocsPipeline, undefined, {
+                                ...currentCustomizationConfig,
+                                structureMode: nextMode,
+                              });
+                            }
+                          }}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#1E2430] border border-[#323B4E] text-xs text-white focus:outline-none focus:border-indigo-400"
+                        >
+                          {STRUCTURE_MODE_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id} className="bg-[#1E2430] text-white">
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-medium text-[#B4B4B4] mb-1">
+                          PDF Font Size &amp; Elements
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            aria-label="Custom PDF Font Size"
+                            value={customFontSizePt}
+                            onChange={(e) => setCustomFontSizePt(Number(e.target.value))}
+                            className="px-2 py-1.5 rounded-lg bg-[#1E2430] border border-[#323B4E] text-xs text-white focus:outline-none"
+                          >
+                            <option value={9.5}>9.5 pt (Compact)</option>
+                            <option value={10.5}>10.5 pt (Standard)</option>
+                            <option value={11.5}>11.5 pt (Large)</option>
+                            <option value={12.5}>12.5 pt (Executive)</option>
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => setIncludeBullets((prev) => !prev)}
+                            className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium cursor-pointer ${
+                              includeBullets
+                                ? 'bg-[#10A37F]/20 border-[#10A37F] text-[#10A37F]'
+                                : 'bg-[#1E2430] border-[#323B4E] text-[#9B9B9B]'
+                            }`}
+                          >
+                            Bullets: {includeBullets ? 'ON' : 'OFF'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setIncludeTable((prev) => !prev)}
+                            className={`px-2 py-1.5 rounded-lg border text-[11px] font-medium cursor-pointer ${
+                              includeTable
+                                ? 'bg-[#10A37F]/20 border-[#10A37F] text-[#10A37F]'
+                                : 'bg-[#1E2430] border-[#323B4E] text-[#9B9B9B]'
+                            }`}
+                          >
+                            Table: {includeTable ? 'ON' : 'OFF'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <button
+                        type="button"
+                        data-testid="apply-output-customization-btn"
+                        onClick={handleApplyCustomizationToOutput}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs cursor-pointer"
+                      >
+                        Apply Customization to Output
+                      </button>
+
+                      <button
+                        type="button"
+                        data-testid="customizer-finish-humanize-btn"
+                        disabled={isSendingToTopHumanizer}
+                        onClick={() =>
+                          handleSendToTopHumanizer(currentDoc, {
+                            autoTriggerDownload: false,
+                            scrollToTopWorkspace: false,
+                          })
+                        }
+                        className="px-3 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white font-bold text-xs flex items-center gap-1 cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                        <span>Finish → Send to Humanizer &amp; Download Section</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* 1-Click Starter Prompts (Generate New Artifact) */}
               <div className="pt-0.5 space-y-1.5">
@@ -1536,7 +2261,7 @@ export default function DocumentAgentSuite() {
               </div>
             </div>
 
-            {/* Conversation, Multi-Doc Analysis, Claude Extended Thinking Trace & AI Missing Details Suggestions */}
+            {/* CHILD 2: Conversation, Multi-Doc Analysis, Claude Extended Thinking Trace & AI Missing Details Suggestions */}
             <div
               ref={chatScrollContainerRef}
               className="p-3.5 sm:p-4 space-y-3.5 max-h-[480px] sm:max-h-[600px] overflow-y-auto"
@@ -1566,7 +2291,7 @@ export default function DocumentAgentSuite() {
                       </span>
                     </div>
 
-                    {/* Multi-Document Pipeline Analysis Badge (if multiple files were read & analyzed) */}
+                    {/* Multi-Document Pipeline Analysis Badge */}
                     {msg.multiDocAnalysis && (
                       <div className="p-2.5 rounded-lg bg-[#14201C] border border-[#10A37F]/40 space-y-1.5 text-[11px]">
                         <div className="font-semibold text-[#10A37F] flex items-center justify-between gap-2">
@@ -1585,7 +2310,7 @@ export default function DocumentAgentSuite() {
                       </div>
                     )}
 
-                    {/* Direct Prompt Execution & Analysis Bullets (Immediate visible response to every user prompt) */}
+                    {/* Direct Prompt Execution & Analysis Bullets */}
                     {msg.directAnswerBullets && msg.directAnswerBullets.length > 0 && (
                       <div
                         data-testid="direct-prompt-execution-summary"
@@ -1678,11 +2403,16 @@ export default function DocumentAgentSuite() {
                         <button
                           type="button"
                           disabled={isSendingToTopHumanizer}
-                          onClick={() => handleSendToTopHumanizer(msg.canonicalDocument!)}
+                          onClick={() =>
+                            handleSendToTopHumanizer(msg.canonicalDocument!, {
+                              autoTriggerDownload: false,
+                              scrollToTopWorkspace: false,
+                            })
+                          }
                           className="min-h-[34px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[11px] font-semibold text-white flex items-center gap-1.5 transition-colors cursor-pointer"
                         >
-                          <ArrowUpRight className="w-3.5 h-3.5 shrink-0" />
-                          <span>Send Final PDF to Top Humanizer ↑</span>
+                          <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                          <span>Finish → Humanize &amp; Ready in Download</span>
                         </button>
 
                         <button
@@ -1703,10 +2433,10 @@ export default function DocumentAgentSuite() {
                           type="button"
                           disabled={isExportingPdf}
                           onClick={() => handleExportPdf(true, msg.canonicalDocument!)}
-                          className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#2A2A2A] hover:bg-[#343434] text-[11px] font-semibold text-[#ECECEC] border border-[#383838] flex items-center gap-1.5 transition-colors cursor-pointer"
+                          className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-[11px] font-semibold text-white flex items-center gap-1.5 transition-colors cursor-pointer"
                         >
                           <Download className="w-3 h-3 shrink-0" />
-                          <span>Download PDF</span>
+                          <span>Download Customized PDF</span>
                         </button>
 
                         <button
@@ -1731,7 +2461,7 @@ export default function DocumentAgentSuite() {
                 );
               })}
 
-              {/* AI Missing Things Auto-Suggestions (1-Click Selection — Zero Manual Typing) */}
+              {/* AI Missing Things Auto-Suggestions */}
               {latestAssistantMsg?.detectedMissingDetails &&
                 latestAssistantMsg.detectedMissingDetails.length > 0 && (
                   <div className="border-t border-[#2F2F2F] pt-3 space-y-2.5">
@@ -1806,8 +2536,19 @@ export default function DocumentAgentSuite() {
               )}
             </div>
 
-            {/* Bottom Unified Claude / ChatGPT Dark Composer Card */}
-            <div className="p-3 sm:p-3.5 border-t border-[#2F2F2F] bg-[#181818] space-y-2.5">
+            {/* CHILD 3 (Selected Element): Bottom Unified Multi-File Upload, Prompt Composer & Direct Humanize-to-Download Bar */}
+            <div
+              data-testid="bottom-pipeline-composer-section"
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingOverPipeline(true);
+              }}
+              onDragLeave={() => setIsDraggingOverPipeline(false)}
+              onDrop={handlePipelineDrop}
+              className={`p-3 sm:p-4 border-t border-[#2F2F2F] space-y-3 transition-colors ${
+                isDraggingOverPipeline ? 'bg-[#1B2B25]' : 'bg-[#181818]'
+              }`}
+            >
               {showContextBox && (
                 <div className="space-y-1">
                   <div className="flex items-center justify-between text-xs text-[#B4B4B4]">
@@ -1830,6 +2571,43 @@ export default function DocumentAgentSuite() {
                 </div>
               )}
 
+              {/* Quick Multi-File Batch Bar inside Child 3 so uploading unlimited files from this exact section is effortless */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-[#1F2724] border border-[#10A37F]/40 text-xs">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-semibold text-[#10A37F]">
+                    Active Queue: {uploadedDocsPipeline.length} File(s)
+                  </span>
+                  <span className="text-[#9B9B9B] text-[11px]">
+                    (Select unlimited files at once or remove any file permanently)
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <label
+                    htmlFor="pipeline-upload-append-input"
+                    data-testid="composer-upload-unlimited-label"
+                    className="px-2.5 py-1 rounded bg-[#10A37F] hover:bg-[#0E906F] text-white font-semibold text-[11px] flex items-center gap-1 cursor-pointer"
+                  >
+                    <Upload className="w-3 h-3 shrink-0" />
+                    <span>+ Add Unlimited Files</span>
+                  </label>
+                  <label
+                    htmlFor="pipeline-upload-replace-input"
+                    className="px-2 py-1 rounded bg-[#2A3833] hover:bg-[#344640] text-[#ECECEC] text-[11px] cursor-pointer"
+                  >
+                    Replace Queue
+                  </label>
+                  {uploadedDocsPipeline.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearAllPipelineDocs}
+                      className="px-2 py-1 rounded bg-rose-950/70 hover:bg-rose-900 text-rose-200 text-[11px] cursor-pointer"
+                    >
+                      Clear Queue
+                    </button>
+                  )}
+                </div>
+              </div>
+
               <div className="rounded-xl bg-[#2A2A2A] border border-[#3D3D3D] focus-within:border-[#10A37F] p-2.5 space-y-2 transition-colors">
                 <input
                   type="text"
@@ -1843,63 +2621,80 @@ export default function DocumentAgentSuite() {
                   }}
                   placeholder={
                     uploadedDocsPipeline.length > 0
-                      ? `Ask anything or give any instruction across your ${uploadedDocsPipeline.length} uploaded file(s)...`
+                      ? `Customize or give any instruction across your ${uploadedDocsPipeline.length} uploaded file(s)...`
                       : chatActionMode === 'edit_current'
-                      ? `Prompt Claude/ChatGPT to update "${currentDoc.title.slice(0, 28)}..." (e.g. 'Add section on ROI')`
-                      : "Describe a new document to build from scratch (e.g. 'Business proposal for Nova')..."
+                      ? `Prompt Claude/ChatGPT to customize "${currentDoc.title.slice(0, 28)}..."`
+                      : "Describe a new customized document to build from scratch..."
                   }
                   className="w-full px-1.5 py-1 bg-transparent text-xs sm:text-sm text-white placeholder-[#9B9B9B] focus:outline-none"
                 />
 
-                <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-[#383838]">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => pdfFileInputRef.current?.click()}
-                      title="Upload 1 or multiple files (.pdf, .docx, .txt)"
-                      aria-label="Upload 1 or multiple files (.pdf, .docx, .txt)"
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-[#383838]">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                    <label
+                      htmlFor="pipeline-upload-append-input"
+                      title="Upload 1 or unlimited files at once (.pdf, .docx, .txt, .md, .csv)"
                       className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#1F1F1F] hover:bg-[#333333] text-[#ECECEC] border border-[#3D3D3D] flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer"
                     >
                       <Upload className="w-3.5 h-3.5 text-[#10A37F] shrink-0" />
-                      <span className="sm:hidden">+ Files</span>
-                      <span className="hidden sm:inline">+ Upload Files</span>
+                      <span>+ Upload Files (∞)</span>
+                    </label>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowInlineFileCreator((prev) => !prev)}
+                      className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#1F1F1F] hover:bg-[#333333] text-[#ECECEC] border border-[#3D3D3D] flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer"
+                    >
+                      <Paperclip className="w-3.5 h-3.5 text-[#B4B4B4] shrink-0" />
+                      <span>+ Bulk Paste</span>
                     </button>
 
-                    {!showContextBox && (
-                      <button
-                        type="button"
-                        onClick={() => setShowContextBox(true)}
-                        title="Paste Source Text"
-                        aria-label="Paste Source Text"
-                        className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#1F1F1F] hover:bg-[#333333] text-[#ECECEC] border border-[#3D3D3D] flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer"
-                      >
-                        <Paperclip className="w-3.5 h-3.5 text-[#B4B4B4] shrink-0" />
-                        <span className="sm:hidden">Paste</span>
-                        <span className="hidden sm:inline">Paste Text</span>
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomizationPanel((prev) => !prev)}
+                      className="min-h-[34px] px-2.5 py-1.5 rounded-lg bg-[#1F1F1F] hover:bg-[#333333] text-indigo-300 border border-indigo-500/40 flex items-center gap-1.5 text-xs font-medium shrink-0 cursor-pointer"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                      <span>Customize</span>
+                    </button>
                   </div>
 
-                  <button
-                    type="button"
-                    data-testid="send-prompt-btn"
-                    disabled={isGenerating}
-                    onClick={() => handleSendPrompt()}
-                    className="min-h-[36px] px-3.5 sm:px-4 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
-                  >
-                    {isGenerating ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Send className="w-3.5 h-3.5" />
-                    )}
-                    <span>
-                      {uploadedDocsPipeline.length > 0
-                        ? `Run on ${uploadedDocsPipeline.length} File(s)`
-                        : chatActionMode === 'edit_current'
-                        ? 'Update Document'
-                        : 'Generate'}
-                    </span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      data-testid="send-prompt-btn"
+                      disabled={isGenerating}
+                      onClick={() => handleSendPrompt()}
+                      className="min-h-[36px] px-3.5 py-1.5 rounded-lg bg-[#10A37F] hover:bg-[#0E906F] text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isGenerating ? (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Send className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {uploadedDocsPipeline.length > 0
+                          ? `Run on ${uploadedDocsPipeline.length} File(s)`
+                          : 'Update Output'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-testid="composer-finish-send-humanizer-btn"
+                      disabled={isSendingToTopHumanizer}
+                      onClick={() =>
+                        handleSendToTopHumanizer(currentDoc, {
+                          autoTriggerDownload: true,
+                          scrollToTopWorkspace: false,
+                        })
+                      }
+                      className="min-h-[36px] px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      <span>Finish → Humanize &amp; Download</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

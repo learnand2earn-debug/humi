@@ -1,3 +1,18 @@
+if (typeof globalThis !== 'undefined') {
+  const g = globalThis as any;
+  if (g.Promise && typeof g.Promise.try !== 'function') {
+    g.Promise.try = function (fn: any, ...args: any[]) {
+      return new Promise((resolve, reject) => {
+        try {
+          resolve(fn(...args));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    };
+  }
+}
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -21,6 +36,7 @@ import {
   generateNextUnlimitedPipelineDocument,
   analyzeMultiDocumentPipeline,
   executeMultiDocPromptPipeline,
+  extractTextFromUploadedPdfOrTextFile,
 } from './document-agent-engine';
 
 test('Step B & C: analyzeRequirementsAndMissingInfo detects missing required fields and generates Roman Urdu + English questions with 3 AI suggested answers', () => {
@@ -441,5 +457,112 @@ test('5-Step Unlimited Continuous Pipeline: continuously feeds 8+ documents (str
   assert.ok(finalMatrixSec.table);
   assert.equal(finalMatrixSec.table!.rows.length, 8);
 });
+
+test('extractTextFromUploadedPdfOrTextFile: safely extracts text without detached ArrayBuffer TypeError', async () => {
+  // Test plain text file
+  const txtFile = new File(['Contract Title: SLA Guarantee\n\nPreserve $8,500 budget.'], 'contract.txt', {
+    type: 'text/plain',
+  });
+  const txtResult = await extractTextFromUploadedPdfOrTextFile(txtFile);
+  assert.equal(txtResult.fileName, 'contract.txt');
+  assert.ok(txtResult.rawText.includes('$8,500'));
+
+  // Test PDF fallback extraction when binary buffer is provided
+  const fakePdfHeader = '%PDF-1.4\n1 0 obj\n<< /Title (Test Document Specification) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF';
+  const pdfFile = new File([fakePdfHeader], 'sample_spec.pdf', {
+    type: 'application/pdf',
+  });
+  const pdfResult = await extractTextFromUploadedPdfOrTextFile(pdfFile);
+  assert.equal(pdfResult.fileName, 'sample_spec.pdf');
+  assert.ok(pdfResult.rawText.length > 0);
+  assert.ok(!pdfResult.rawText.includes('Decentralized Solar Micro-Grids'));
+  assert.ok(pdfResult.pageCount >= 1);
+});
+
+test('Unlimited Multi-File Parallel Ingestion + Full Output Customization + Humanizer PDF Export', async () => {
+  const { ingestMultipleFilesIntoPipeline } = await import('./document-agent-engine');
+
+  const files = [
+    new File(['Alpha Project Charter: $45,000 budget, 99.9% SLA.'], '01_Alpha_Charter.txt', { type: 'text/plain' }),
+    new File(['Beta Security Audit: Zero-Trust TLS 1.3 and SOC2 Type II compliance.'], '02_Beta_Security.md', { type: 'text/markdown' }),
+    new File(['Gamma Financial Ledger: 3.8x ROI within 14 weeks.'], '03_Gamma_Finance.csv', { type: 'text/csv' }),
+    new File(['Delta API Spec: 18ms p95 latency across 6 regions.'], '04_Delta_API.json', { type: 'application/json' }),
+    new File(['Epsilon Rollout Plan: 5 phases completed by Q4 2026.'], '05_Epsilon_Rollout.txt', { type: 'text/plain' }),
+  ];
+
+  const ingested = await ingestMultipleFilesIntoPipeline(files);
+  assert.equal(ingested.length, 5);
+  assert.equal(ingested[0].fileName, '01_Alpha_Charter.txt');
+  assert.equal(ingested[4].fileName, '05_Epsilon_Rollout.txt');
+
+  // Execute with full customization (file_by_file mode + custom title & subtitle)
+  const customizedResult = executeMultiDocPromptPipeline({
+    prompt: 'Create a customized file-by-file deliverable',
+    uploadedDocs: ingested,
+    mode: 'generate_new',
+    tone: 'Professional',
+    audience: 'Executive / C-Suite',
+    customization: {
+      customTitle: 'My Custom Enterprise Master Deliverable 2026',
+      customSubtitle: 'Prepared Exclusively from 5 Uploaded Client Files',
+      structureMode: 'file_by_file',
+      includeBullets: true,
+      includeTable: true,
+    },
+  });
+
+  assert.equal(customizedResult.canonicalDocument.title, 'My Custom Enterprise Master Deliverable 2026');
+  assert.equal(
+    customizedResult.canonicalDocument.subtitle,
+    'Prepared Exclusively from 5 Uploaded Client Files'
+  );
+  assert.equal(customizedResult.canonicalDocument.sections.length, 5);
+
+  // Export for Top Humanizer and verify valid PDF bytes are produced with custom options
+  const pdfBytes = await exportCanonicalDocumentToPdfBytes(
+    customizedResult.canonicalDocument,
+    PROFESSIONAL_TEMPLATES[0],
+    {
+      cleanMinimalStructure: true,
+      forTopHumanizer: true,
+      fontStyle: 'serif',
+      shapePreset: 'executive_figure',
+      fontSizePt: 11.5,
+      customHeaderText: 'CUSTOM BRAND HEADER',
+      includeBullets: true,
+      includeTable: true,
+    }
+  );
+  assert.ok(pdfBytes.byteLength > 500);
+});
+
+test('Mixed 10-file batch upload handles PDF, DOCX, HTML, RTF, CSV, JSON, TXT, MD and arbitrary binary cleanly with 0 errors', async () => {
+  const { ingestMultipleFilesIntoPipeline } = await import('./document-agent-engine');
+
+  const binaryBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+  const batchFiles = [
+    new File(['Budget Proposal $72,000 for 12 weeks'], '01_Budget.txt', { type: 'text/plain' }),
+    new File(['# Architecture\nZero-trust mesh with 99.99% uptime'], '02_Arch.md', { type: 'text/markdown' }),
+    new File(['Metric,Value\nROAS,4.2x\nCTR,3.8%'], '03_Metrics.csv', { type: 'text/csv' }),
+    new File(['{"region":"US-East","sla":"99.99%"}'], '04_Config.json', { type: 'application/json' }),
+    new File(['<html><body><h1>Compliance</h1><p>SOC2 Type II verified</p></body></html>'], '05_Audit.html', { type: 'text/html' }),
+    new File(['{\\rtf1\\ansi Signed NDA Contract \\par Effective Nov 2026}'], '06_NDA.rtf', { type: 'application/rtf' }),
+    new File(['%PDF-1.4\n1 0 obj << /Title (Roadmap) >> endobj\n(Q4 Migration Plan $35,000) Tj'], '07_Roadmap.pdf', { type: 'application/pdf' }),
+    new File(['PK\x03\x04dummy docx content with Market Analysis 2026'], '08_Brief.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+    new File([binaryBytes], '09_Screenshot.png', { type: 'image/png' }),
+    new File(['Final Notes: Launch checklist signed off.'], '10_Checklist.log', { type: 'text/plain' }),
+  ];
+
+  const ingested = await ingestMultipleFilesIntoPipeline(batchFiles);
+  assert.equal(ingested.length, 10);
+  assert.equal(ingested[0].fileName, '01_Budget.txt');
+  assert.equal(ingested[6].fileName, '07_Roadmap.pdf');
+  assert.equal(ingested[8].fileName, '09_Screenshot.png');
+  assert.equal(ingested[9].fileName, '10_Checklist.log');
+  assert.ok(ingested.every((doc) => doc.rawText.trim().length > 0 && doc.pageCount >= 1));
+});
+
 
 
